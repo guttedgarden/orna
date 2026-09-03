@@ -8,7 +8,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-EMBEDDING_DIMENSION = 1024
+from app.embedding_profile import ACTIVE_EMBEDDING_PROFILE
+
+EMBEDDING_DIMENSION = ACTIVE_EMBEDDING_PROFILE.dimension
 
 
 class MemoryScope(StrEnum):
@@ -64,6 +66,8 @@ class _MemoryPersistenceFields(_DomainModel):
         """pgvector принимает только векторы с finite-компонентами."""
         if not all(math.isfinite(value) for value in embedding):
             raise ValueError("embedding values must be finite")
+        if not any(value != 0.0 for value in embedding):
+            raise ValueError("embedding must have a non-zero norm")
         return embedding
 
     @model_validator(mode="after")

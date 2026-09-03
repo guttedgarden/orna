@@ -5,19 +5,19 @@ description = "Self-hosted context & memory MCP backend for AI agents"
 readme = "../README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "asyncpg>=0.31.0",
-    "fastembed>=0.4.1",
-    "mcp>=1.1.0",
-    "pgvector>=0.5.0",
-    "pydantic>=2.8.0",
-    "pydantic-settings>=2.5.0",
+    "asyncpg==0.31.0",
+    "fastembed==0.8.0",
+    "mcp==2.1.1",
+    "pgvector==0.5.0",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
-    "ruff>=0.6.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.5",
 ]
 
 [tool.ruff]

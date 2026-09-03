@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.embedding_profile import ACTIVE_EMBEDDING_PROFILE
 
 # Детерминированное определение расположения файлов .env относительно структуры репозитория
 _APP_DIR = Path(__file__).resolve().parent
@@ -26,8 +28,8 @@ class Settings(BaseSettings):
     )
 
     # Embedding settings
-    embedding_model: str = "intfloat/multilingual-e5-large"
-    embedding_threads: int = 2
+    embedding_model: str = ACTIVE_EMBEDDING_PROFILE.model_name
+    embedding_threads: int = Field(default=2, ge=1)
 
     # Database settings (PostgreSQL 16 + pgvector)
     # Параметры подключения к PostgreSQL и настройки connection pool
@@ -50,7 +52,7 @@ class Settings(BaseSettings):
 
     # Profile versions
     # Версии профилей векторизации и лексического анализа
-    embedding_profile_version: str = "e5-v1"
+    embedding_profile_version: str = ACTIVE_EMBEDDING_PROFILE.version
     lexical_profile_version: str = "lexical-v1"
 
     # MCP server settings
@@ -60,6 +62,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def assemble_database_url_and_validate_pool(self) -> Self:
+        if self.embedding_model != ACTIVE_EMBEDDING_PROFILE.model_name:
+            raise ValueError(
+                "embedding_model must match the active embedding profile: "
+                f"{ACTIVE_EMBEDDING_PROFILE.model_name}"
+            )
+        if self.embedding_profile_version != ACTIVE_EMBEDDING_PROFILE.version:
+            raise ValueError(
+                "embedding_profile_version must match the active embedding profile: "
+                f"{ACTIVE_EMBEDDING_PROFILE.version}"
+            )
+
         # Вычисляем database_url, если он не был передан явно
         if not self.database_url:
             self.database_url = (

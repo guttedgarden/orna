@@ -31,7 +31,7 @@ def memory_data(**overrides: object) -> dict[str, object]:
         "identifiers": ["MemoryRepository"],
         "lexical_source": "PostgreSQL MemoryRepository memory repository",
         "lexical_profile_version": "lexical-v1",
-        "embedding": [0.0] * EMBEDDING_DIMENSION,
+        "embedding": [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1),
         "embedding_model": "intfloat/multilingual-e5-large",
         "embedding_profile_version": "e5-v1",
         "provenance": {"source": "test"},
@@ -82,6 +82,7 @@ def test_memory_insert_record_accepts_valid_project_revision() -> None:
         ({"embedding": [0.0] * EMBEDDING_DIMENSION + [0.0]}, "at most 1024 items"),
         ({"embedding": [float("nan")] * EMBEDDING_DIMENSION}, "finite"),
         ({"embedding": [float("inf")] * EMBEDDING_DIMENSION}, "finite"),
+        ({"embedding": [0.0] * EMBEDDING_DIMENSION}, "non-zero norm"),
     ],
 )
 def test_memory_insert_record_rejects_invalid_domain_state(

@@ -25,7 +25,8 @@ from app.db import (
 
 # Хэш контента фиксированной длины 32 байта для тестов
 DUMMY_HASH_32 = hashlib.sha256(b"dummy_content").digest()
-DUMMY_VECTOR = [0.0] * 1024
+DUMMY_VECTOR = [1.0] + [0.0] * 1023
+EXPECTED_MIGRATIONS = ["0001_initial.sql", "0002_reject_zero_embeddings.sql"]
 
 
 @pytest.fixture
@@ -126,16 +127,17 @@ class TestMigrationRunner:
     """Тесты раннера миграций: идемпотентность, транзакционность, блокировки."""
 
     async def test_run_migrations_initial(self, test_database: Settings):
-        """Проверка первого запуска миграций: успешное применение 0001_initial.sql."""
+        """Проверка первого запуска: все versioned migrations успешно применяются."""
         conn = await asyncpg.connect(test_database.database_url)
         try:
             applied = await run_migrations(conn)
-            assert applied == ["0001_initial.sql"]
+            assert applied == EXPECTED_MIGRATIONS
 
             # Проверяем запись в таблице schema_migrations
-            rows = await conn.fetch("SELECT version, checksum FROM schema_migrations;")
-            assert len(rows) == 1
-            assert rows[0]["version"] == "0001_initial.sql"
+            rows = await conn.fetch(
+                "SELECT version, checksum FROM schema_migrations ORDER BY version;"
+            )
+            assert [row["version"] for row in rows] == EXPECTED_MIGRATIONS
 
             # Проверяем существование таблицы memories и расширения vector
             memories_exists = await conn.fetchval(
@@ -150,7 +152,7 @@ class TestMigrationRunner:
         conn = await asyncpg.connect(test_database.database_url)
         try:
             applied_first = await run_migrations(conn)
-            assert applied_first == ["0001_initial.sql"]
+            assert applied_first == EXPECTED_MIGRATIONS
 
             applied_second = await run_migrations(conn)
             assert applied_second == []
@@ -168,7 +170,7 @@ class TestMigrationRunner:
         try:
             # Применяем оригинальную миграцию
             applied = await run_migrations(conn, migrations_dir=mig_dir)
-            assert len(applied) == 1
+            assert applied == EXPECTED_MIGRATIONS
 
             # Модифицируем файл миграции на диске
             initial_file = mig_dir / "0001_initial.sql"
@@ -196,7 +198,7 @@ class TestMigrationRunner:
         try:
             # Применяем миграцию
             applied = await run_migrations(conn, migrations_dir=mig_dir)
-            assert len(applied) == 1
+            assert applied == EXPECTED_MIGRATIONS
 
             # Удаляем примененный файл миграции с диска
             initial_file = mig_dir / "0001_initial.sql"
@@ -272,7 +274,7 @@ class TestMigrationRunner:
 
             # Ровно один применил миграцию, второй вернул пустой список
             results = [res1, res2]
-            assert ["0001_initial.sql"] in results
+            assert EXPECTED_MIGRATIONS in results
             assert [] in results
         finally:
             await pre_pool.close()
@@ -281,7 +283,7 @@ class TestMigrationRunner:
         """Полный жизненный цикл: bootstrap -> миграции -> пул приложения -> запись pgvector."""
         # 1. Bootstrap: миграции накатываются через прямое соединение
         applied = await run_database_migrations(test_database)
-        assert applied == ["0001_initial.sql"]
+        assert applied == EXPECTED_MIGRATIONS
 
         # 2. Создание пула приложения со строгим init_connection (register_vector)
         pool = await create_db_pool(test_database)
@@ -349,6 +351,12 @@ class TestSchemaInvariants:
         async with migrated_pool.acquire() as conn:
             with pytest.raises(asyncpg.CheckViolationError):
                 await insert_memory(conn, content_hash=b"invalid_short_hash")
+
+    async def test_invariant_embedding_must_have_nonzero_norm(self, migrated_pool: asyncpg.Pool):
+        """Инвариант: cosine embedding не может быть zero vector."""
+        async with migrated_pool.acquire() as conn:
+            with pytest.raises(asyncpg.CheckViolationError):
+                await insert_memory(conn, embedding=[0.0] * 1024)
 
     async def test_invariant_unique_logical_revision(self, migrated_pool: asyncpg.Pool):
         """Инвариант: пара (logical_id, revision) уникальна."""

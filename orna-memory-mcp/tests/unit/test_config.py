@@ -34,6 +34,18 @@ class TestConfigDefaults:
         assert cfg.embedding_profile_version == "e5-v1"
         assert cfg.lexical_profile_version == "lexical-v1"
 
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"embedding_model": "BAAI/bge-small-en-v1.5"}, "embedding_model"),
+            ({"embedding_profile_version": "e5-v2"}, "embedding_profile_version"),
+            ({"embedding_threads": 0}, "greater than or equal to 1"),
+        ],
+    )
+    def test_rejects_incompatible_embedding_settings(self, overrides, message):
+        with pytest.raises(ValidationError, match=message):
+            Settings(**overrides, _env_file=None)
+
 
 class TestDatabaseUrlComputation:
     """Проверка формирования database_url / Verify database_url computation and overrides."""
