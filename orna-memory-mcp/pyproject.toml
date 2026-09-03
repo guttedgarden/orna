@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Self-hosted context & memory MCP backend for AI agents"
 readme = "../README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "asyncpg>=0.31.0",
+    "fastembed>=0.4.1",
+    "mcp>=1.1.0",
+    "pgvector>=0.5.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.5.0",
+]
 
 [dependency-groups]
 dev = [
@@ -37,3 +44,4 @@ indent-style = "space"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+pythonpath = ["."]
