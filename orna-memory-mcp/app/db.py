@@ -29,26 +29,22 @@ class MigrationError(Exception):
 
 
 class ChecksumMismatchError(MigrationError):
-    """Хэш файла миграции на диске не совпадает с записью в базе данных.
-    """
+    """Хэш файла миграции на диске не совпадает с записью в базе данных."""
 
 
 class DuplicateMigrationError(MigrationError):
-    """Обнаружены файлы миграций с совпадающим номером версии.
-    """
+    """Обнаружены файлы миграций с совпадающим номером версии."""
 
 
 async def init_connection(conn: asyncpg.Connection) -> None:
-    """Инициализация соединения с регистрацией типа vector для asyncpg.
-    """
+    """Инициализация соединения с регистрацией типа vector для asyncpg."""
     from pgvector.asyncpg import register_vector
 
     await register_vector(conn)
 
 
 async def create_db_pool(settings: "Settings") -> asyncpg.Pool:
-    """Создание пула соединений к PostgreSQL с регистрацией pgvector.
-    """
+    """Создание пула соединений к PostgreSQL с регистрацией pgvector."""
     return await asyncpg.create_pool(
         dsn=settings.database_url,
         min_size=settings.database_pool_min_size,
@@ -61,8 +57,7 @@ async def _execute_migrations(
     conn: asyncpg.Connection,
     migrations_dir: Path,
 ) -> list[str]:
-    """Внутренняя логика применения миграций на конкретном соединении.
-    """
+    """Внутренняя логика применения миграций на конкретном соединении."""
     if not migrations_dir.is_dir():
         raise MigrationError(f"Migrations directory does not exist: {migrations_dir}")
 
@@ -148,8 +143,7 @@ async def run_migrations(
     pool_or_conn: asyncpg.Pool | asyncpg.Connection,
     migrations_dir: Path | str | None = None,
 ) -> list[str]:
-    """Сериализованный раннер миграций схемы БД с проверкой контрольных сумм.
-    """
+    """Сериализованный раннер миграций схемы БД с проверкой контрольных сумм."""
     target_dir = (
         Path(migrations_dir)
         if migrations_dir is not None
@@ -167,8 +161,7 @@ async def run_database_migrations(
     settings: "Settings",
     migrations_dir: Path | str | None = None,
 ) -> list[str]:
-    """Запуск миграций через отдельное bootstrap-соединение до инициализации пула.
-    """
+    """Запуск миграций через отдельное bootstrap-соединение до инициализации пула."""
     conn = await asyncpg.connect(settings.database_url)
     try:
         return await run_migrations(conn, migrations_dir=migrations_dir)

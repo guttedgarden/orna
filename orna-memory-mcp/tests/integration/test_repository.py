@@ -1,0 +1,258 @@
+"""Интеграционные тесты PostgreSQL repository и retrieval-каналов."""
+
+from collections.abc import AsyncIterator
+from uuid import uuid4
+
+import asyncpg
+import pytest
+
+from app.config import Settings
+from app.db import init_connection, run_database_migrations
+from app.models import EMBEDDING_DIMENSION, MemoryInsertRecord, MemoryScope, MemoryStatus
+from app.normalizer import (
+    build_lexical_source,
+    canonical_content_hash,
+    normalize_query_to_plain_tokens,
+)
+from app.repository import MemoryRepository
+
+
+@pytest.fixture
+async def repository_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
+    """Создаёт отдельную БД и single-connection pool для наблюдения за GUC isolation."""
+    base_settings = Settings()
+    database_name = f"orna_repository_test_{uuid4().hex[:10]}"
+    admin_conn = await asyncpg.connect(
+        f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
+        f"@{base_settings.postgres_host}:{base_settings.postgres_port}/template1"
+    )
+    await admin_conn.execute(f'CREATE DATABASE "{database_name}";')
+
+    test_settings = base_settings.model_copy(
+        update={
+            "postgres_db": database_name,
+            "database_url": (
+                f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
+                f"@{base_settings.postgres_host}:{base_settings.postgres_port}/{database_name}"
+            ),
+            "hnsw_ef_search": 73,
+            "hnsw_iterative_scan": "strict_order",
+        }
+    )
+
+    await run_database_migrations(test_settings)
+    pool = await asyncpg.create_pool(
+        dsn=test_settings.database_url,
+        min_size=1,
+        max_size=1,
+        init=init_connection,
+    )
+    try:
+        yield test_settings, pool
+    finally:
+        await pool.close()
+        await admin_conn.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = $1 AND pid <> pg_backend_pid();",
+            database_name,
+        )
+        await admin_conn.execute(f'DROP DATABASE "{database_name}";')
+        await admin_conn.close()
+
+
+def unit_vector(primary_index: int, secondary_index: int | None = None) -> list[float]:
+    """Строит ненулевой deterministic vector для cosine distance."""
+    vector = [0.0] * EMBEDDING_DIMENSION
+    vector[primary_index] = 1.0
+    if secondary_index is not None:
+        vector[secondary_index] = 0.1
+    return vector
+
+
+def memory_record(
+    *,
+    content: str,
+    embedding: list[float],
+    scope: MemoryScope = MemoryScope.GLOBAL,
+    project_id: str | None = None,
+    status: MemoryStatus = MemoryStatus.ACTIVE,
+    identifiers: list[str] | None = None,
+) -> MemoryInsertRecord:
+    """Создаёт валидный insert DTO с реальными lexical/hash representations."""
+    record_identifiers = identifiers or []
+    return MemoryInsertRecord(
+        id=uuid4(),
+        logical_id=uuid4(),
+        revision=1,
+        supersedes_id=None,
+        scope=scope,
+        project_id=project_id,
+        memory_type="fact",
+        status=status,
+        content=content,
+        content_hash=canonical_content_hash(content),
+        tags=["repository"],
+        identifiers=record_identifiers,
+        lexical_source=build_lexical_source(content, ["repository"], record_identifiers),
+        lexical_profile_version="lexical-v1",
+        embedding=embedding,
+        embedding_model="intfloat/multilingual-e5-large",
+        embedding_profile_version="e5-v1",
+        provenance={"source": "integration-test"},
+    )
+
+
+async def test_insert_and_get_hydrate_complete_records(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    inserted = await repository.insert(
+        memory_record(content="Repository hydration", embedding=unit_vector(0))
+    )
+
+    assert inserted.provenance == {"source": "integration-test"}
+    assert inserted.created_at is not None
+    assert await repository.get_by_id(inserted.id) == inserted
+    assert await repository.get_active_by_logical_id(inserted.logical_id) == inserted
+    assert await repository.get_by_id(uuid4()) is None
+    assert await repository.get_active_by_logical_id(uuid4()) is None
+
+
+@pytest.mark.parametrize("strategy", ["exact", "hnsw"])
+async def test_search_dense_filters_status_and_project_visibility(
+    repository_database: tuple[Settings, asyncpg.Pool],
+    strategy: str,
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+
+    project_a = await repository.insert(
+        memory_record(
+            content="Project A",
+            embedding=unit_vector(0),
+            scope=MemoryScope.PROJECT,
+            project_id="project-a",
+        )
+    )
+    global_memory = await repository.insert(
+        memory_record(content="Global", embedding=unit_vector(0, 1))
+    )
+    hidden_records = [
+        await repository.insert(
+            memory_record(
+                content="Project B",
+                embedding=unit_vector(0),
+                scope=MemoryScope.PROJECT,
+                project_id="project-b",
+            )
+        ),
+        await repository.insert(
+            memory_record(
+                content="Superseded",
+                embedding=unit_vector(0),
+                status=MemoryStatus.SUPERSEDED,
+            )
+        ),
+        await repository.insert(
+            memory_record(
+                content="Archived",
+                embedding=unit_vector(0),
+                status=MemoryStatus.ARCHIVED,
+            )
+        ),
+    ]
+
+    if strategy == "hnsw":
+        # Маленькая таблица обычно предпочитает seq scan; принуждаем planner проверить HNSW path.
+        async with pool.acquire() as conn:
+            await conn.execute("SET enable_seqscan = off")
+
+    results = await repository.search_dense(unit_vector(0), "project-a", 10, strategy=strategy)
+    result_ids = [record.id for record, _distance in results]
+
+    assert result_ids == [project_a.id, global_memory.id]
+    assert not ({record.id for record in hidden_records} & set(result_ids))
+    assert results[0][1] == pytest.approx(0.0)
+
+    # Repository search settings должны быть transaction-local и не загрязнять pool.
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT current_setting('enable_indexscan')") == "on"
+        assert await conn.fetchval("SELECT current_setting('hnsw.ef_search')") == "40"
+        assert await conn.fetchval("SELECT current_setting('hnsw.iterative_scan')") == "off"
+        await conn.execute("SET enable_seqscan = on")
+
+
+async def test_search_dense_uses_configured_strategy_when_override_is_absent(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    hnsw_settings = settings.model_copy(update={"dense_retrieval_strategy": "hnsw"})
+    repository = MemoryRepository(pool, hnsw_settings)
+    expected = await repository.insert(
+        memory_record(content="Configured HNSW", embedding=unit_vector(2))
+    )
+
+    results = await repository.search_dense(unit_vector(2), None, 1)
+
+    assert [record.id for record, _distance in results] == [expected.id]
+
+
+async def test_search_lexical_handles_identifiers_hyphens_and_visibility(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    executor = await repository.insert(
+        memory_record(
+            content="Executes upstream response providers.",
+            embedding=unit_vector(3),
+            identifiers=["ResponseProviderExecutor"],
+        )
+    )
+    hyphenated = await repository.insert(
+        memory_record(
+            content="Propagate request metadata.",
+            embedding=unit_vector(4),
+            identifiers=["foo-bar", "x-request-id"],
+        )
+    )
+    await repository.insert(
+        memory_record(
+            content="ResponseProviderExecutor is private.",
+            embedding=unit_vector(5),
+            scope=MemoryScope.PROJECT,
+            project_id="project-b",
+            identifiers=["ResponseProviderExecutor"],
+        )
+    )
+
+    identifier_results = await repository.search_lexical(
+        normalize_query_to_plain_tokens("ResponseProviderExecutor"),
+        "project-a",
+        10,
+    )
+    foo_bar_results = await repository.search_lexical("foo-bar", "project-a", 10)
+    request_id_results = await repository.search_lexical("x-request-id", "project-a", 10)
+
+    assert [record.id for record, _score in identifier_results] == [executor.id]
+    assert [record.id for record, _score in foo_bar_results] == [hyphenated.id]
+    assert [record.id for record, _score in request_id_results] == [hyphenated.id]
+    assert all(score > 0 for _record, score in identifier_results)
+
+
+async def test_get_active_by_logical_id_ignores_non_active_record(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    archived = await repository.insert(
+        memory_record(
+            content="Archived record",
+            embedding=unit_vector(6),
+            status=MemoryStatus.ARCHIVED,
+        )
+    )
+
+    assert await repository.get_by_id(archived.id) == archived
+    assert await repository.get_active_by_logical_id(archived.logical_id) is None

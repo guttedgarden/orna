@@ -30,8 +30,7 @@ DUMMY_VECTOR = [0.0] * 1024
 
 @pytest.fixture
 async def test_database():
-    """Создает изолированную временную БД для теста и удаляет её после выполнения.
-    """
+    """Создает изолированную временную БД для теста и удаляет её после выполнения."""
     settings = Settings()
     db_name = f"orna_test_{uuid.uuid4().hex[:10]}"
     admin_conn = await asyncpg.connect(
@@ -64,8 +63,7 @@ async def test_database():
 
 @pytest.fixture
 async def migrated_pool(test_database: Settings):
-    """Инициализирует БД миграциями и возвращает подключенный пул соединений.
-    """
+    """Инициализирует БД миграциями и возвращает подключенный пул соединений."""
     await run_database_migrations(test_database)
     pool = await create_db_pool(test_database)
     try:
