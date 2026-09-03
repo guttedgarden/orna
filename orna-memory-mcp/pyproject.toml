@@ -34,7 +34,11 @@ select = [
     "UP",  # pyupgrade
     "RUF", # ruff-specific rules
 ]
-ignore = []
+ignore = [
+    "RUF001", # ambiguous-unicode-character-string (Cyrillic letters)
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
 
 [tool.ruff.format]
 quote-style = "double"

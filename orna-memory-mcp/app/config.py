@@ -1,14 +1,26 @@
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Детерминированное определение расположения файлов .env относительно структуры репозитория
+_APP_DIR = Path(__file__).resolve().parent
+_SERVICE_DIR = _APP_DIR.parent
+_REPO_DIR = _SERVICE_DIR.parent
+
+_ENV_FILES: list[Path] = []
+if (_REPO_DIR / ".env").is_file():
+    _ENV_FILES.append(_REPO_DIR / ".env")
+if (_SERVICE_DIR / ".env").is_file():
+    _ENV_FILES.append(_SERVICE_DIR / ".env")
 
 
 class Settings(BaseSettings):
     """Application settings for orna-memory-mcp service."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=tuple(_ENV_FILES) if _ENV_FILES else ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
