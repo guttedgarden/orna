@@ -32,6 +32,8 @@ class TestConfigDefaults:
     def test_default_profile_versions(self):
         cfg = Settings(_env_file=None)
         assert cfg.embedding_profile_version == "e5-v1"
+        assert cfg.embedding_cache_dir.name == "fastembed"
+        assert cfg.embedding_local_files_only is True
         assert cfg.lexical_profile_version == "lexical-v1"
 
     @pytest.mark.parametrize(

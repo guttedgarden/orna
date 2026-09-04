@@ -15,6 +15,10 @@ class EmbeddingOutputError(ValueError):
     """FastEmbed вернул результат, несовместимый с активным profile."""
 
 
+class ModelCacheMissingError(RuntimeError):
+    """Pinned model snapshot отсутствует в configured cache."""
+
+
 def ensure_prefix(text: str, prefix: str) -> str:
     """Применяет canonical E5 prefix ровно один раз."""
     tag = prefix.split(":", maxsplit=1)[0].strip().lower()
@@ -35,6 +39,8 @@ class EmbeddingService:
         self.model_name = configured_settings.embedding_model
         self.profile_version = configured_settings.embedding_profile_version
         self.threads = configured_settings.embedding_threads
+        self.cache_dir = configured_settings.embedding_cache_dir
+        self.local_files_only = configured_settings.embedding_local_files_only
         self._model: TextEmbedding | None = None
         self._model_lock = Lock()
 
@@ -56,9 +62,23 @@ class EmbeddingService:
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
+                    model_options: dict[str, Any] = {
+                        "model_name": self.model_name,
+                        "cache_dir": str(self.cache_dir),
+                        "threads": self.threads,
+                        "local_files_only": self.local_files_only,
+                    }
+                    if self.local_files_only:
+                        snapshot_path = self.profile.snapshot_path(self.cache_dir)
+                        if not snapshot_path.is_dir():
+                            raise ModelCacheMissingError(
+                                "pinned embedding snapshot is missing; run "
+                                "`python -m app.model_cache` before starting the service"
+                            )
+                        model_options["specific_model_path"] = str(snapshot_path)
+
                     self._model = TextEmbedding(
-                        model_name=self.model_name,
-                        threads=self.threads,
+                        **model_options,
                     )
         return self._model
 

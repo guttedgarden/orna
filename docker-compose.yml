@@ -1,4 +1,21 @@
 services:
+  model-cache-init:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    restart: "on-failure:5"
+
+    environment:
+      EMBEDDING_CACHE_DIR: /var/cache/orna/fastembed
+      HF_HUB_DISABLE_XET: "1"
+
+    volumes:
+      - fastembed-cache:/var/cache/orna/fastembed
+
+    networks:
+      - memory-internal
+
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
     restart: unless-stopped
@@ -27,3 +44,7 @@ services:
 networks:
   memory-internal:
     driver: bridge
+
+volumes:
+  # Восстанавливаемый model cache; будущий MCP runtime подключает его read-only.
+  fastembed-cache:

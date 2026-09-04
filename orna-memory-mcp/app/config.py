@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # Embedding settings
     embedding_model: str = ACTIVE_EMBEDDING_PROFILE.model_name
     embedding_threads: int = Field(default=2, ge=1)
+    embedding_cache_dir: Path = _REPO_DIR / "data" / "fastembed"
+    embedding_local_files_only: bool = True
 
     # Database settings (PostgreSQL 16 + pgvector)
     # Параметры подключения к PostgreSQL и настройки connection pool

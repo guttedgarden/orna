@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 
 from app.config import Settings
-from app.embeddings import EmbeddingOutputError, EmbeddingService, ensure_prefix
+from app.embeddings import (
+    EmbeddingOutputError,
+    EmbeddingService,
+    ModelCacheMissingError,
+    ensure_prefix,
+)
 
 
 class TestPrefixHandling:
@@ -145,7 +150,35 @@ class TestEmbeddingService:
             with pytest.raises(ValueError, match="dimension does not match"):
                 EmbeddingService(Settings(_env_file=None))
 
-    def test_model_initializes_once_under_concurrency(self, service, mock_model):
+    def test_offline_model_requires_pinned_snapshot(self, tmp_path):
+        service = EmbeddingService(
+            Settings(embedding_cache_dir=tmp_path, embedding_local_files_only=True, _env_file=None)
+        )
+
+        with pytest.raises(ModelCacheMissingError, match=r"python -m app\.model_cache"):
+            _ = service.model
+
+    def test_offline_model_uses_pinned_snapshot(self, tmp_path, mock_model):
+        service = EmbeddingService(
+            Settings(embedding_cache_dir=tmp_path, embedding_local_files_only=True, _env_file=None)
+        )
+        snapshot_path = service.profile.snapshot_path(tmp_path)
+        snapshot_path.mkdir(parents=True)
+
+        with patch("app.embeddings.TextEmbedding", return_value=mock_model) as constructor:
+            assert service.model is mock_model
+
+        constructor.assert_called_once_with(
+            model_name="intfloat/multilingual-e5-large",
+            cache_dir=str(tmp_path),
+            threads=2,
+            local_files_only=True,
+            specific_model_path=str(snapshot_path),
+        )
+
+    def test_model_initializes_once_under_concurrency(self, mock_model):
+        service = EmbeddingService(Settings(embedding_local_files_only=False, _env_file=None))
+
         def slow_constructor(**_kwargs):
             time.sleep(0.05)
             return mock_model
@@ -157,5 +190,7 @@ class TestEmbeddingService:
         assert all(model is mock_model for model in models)
         constructor.assert_called_once_with(
             model_name="intfloat/multilingual-e5-large",
+            cache_dir=str(service.cache_dir),
             threads=2,
+            local_files_only=False,
         )
