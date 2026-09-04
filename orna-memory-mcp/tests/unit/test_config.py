@@ -29,9 +29,22 @@ class TestConfigDefaults:
         assert cfg.hnsw_ef_search == 40
         assert cfg.hnsw_iterative_scan == "relaxed_order"
 
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"retrieval_candidate_pool_size": 0},
+            {"rrf_k": 0},
+            {"hnsw_ef_search": 0},
+        ],
+    )
+    def test_rejects_non_positive_search_settings(self, overrides):
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            Settings(**overrides, _env_file=None)
+
     def test_default_profile_versions(self):
         cfg = Settings(_env_file=None)
         assert cfg.embedding_profile_version == "e5-v1"
+        assert cfg.embedding_max_concurrency == 1
         assert cfg.embedding_cache_dir.name == "fastembed"
         assert cfg.embedding_local_files_only is True
         assert cfg.lexical_profile_version == "lexical-v1"
@@ -42,6 +55,7 @@ class TestConfigDefaults:
             ({"embedding_model": "BAAI/bge-small-en-v1.5"}, "embedding_model"),
             ({"embedding_profile_version": "e5-v2"}, "embedding_profile_version"),
             ({"embedding_threads": 0}, "greater than or equal to 1"),
+            ({"embedding_max_concurrency": 0}, "greater than or equal to 1"),
         ],
     )
     def test_rejects_incompatible_embedding_settings(self, overrides, message):

@@ -101,6 +101,8 @@ class MemoryRepository:
         project_id: str | None,
         limit: int,
         strategy: DenseSearchStrategy | None = None,
+        *,
+        memory_type: str | None = None,
     ) -> list[tuple[MemoryRecord, float]]:
         """Ищет активные memories по cosine distance в exact или HNSW режиме."""
         effective_strategy = strategy or self._settings.dense_retrieval_strategy
@@ -129,12 +131,14 @@ class MemoryRepository:
                     FROM memories
                     WHERE status = 'active'
                       AND (scope = 'global' OR project_id = $1)
+                      AND ($4::text IS NULL OR memory_type = $4)
                     ORDER BY distance ASC
                     LIMIT $3;
                     """,
                     project_id,
                     query_embedding,
                     limit,
+                    memory_type,
                 )
 
         return [(self._hydrate(row), float(row["distance"])) for row in rows]
@@ -144,6 +148,8 @@ class MemoryRepository:
         plain_query_tokens: str,
         project_id: str | None,
         limit: int,
+        *,
+        memory_type: str | None = None,
     ) -> list[tuple[MemoryRecord, float]]:
         """Ищет активные memories через syntax-safe PostgreSQL FTS query."""
         # Отдельное соединение позволяет запускать канал параллельно с dense retrieval.
@@ -161,12 +167,14 @@ class MemoryRepository:
                 WHERE m.lexical_text @@ query.q
                   AND m.status = 'active'
                   AND (m.scope = 'global' OR m.project_id = $1)
+                  AND ($4::text IS NULL OR m.memory_type = $4)
                 ORDER BY lexical_score DESC, m.id ASC
                 LIMIT $3;
                 """,
                 project_id,
                 plain_query_tokens,
                 limit,
+                memory_type,
             )
 
         return [(self._hydrate(row), float(row["lexical_score"])) for row in rows]

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,7 @@ import pytest
 
 from app.config import Settings
 from app.embeddings import (
+    AsyncEmbeddingExecutor,
     EmbeddingOutputError,
     EmbeddingService,
     ModelCacheMissingError,
@@ -194,3 +196,33 @@ class TestEmbeddingService:
             threads=2,
             local_files_only=False,
         )
+
+
+class TestAsyncEmbeddingExecutor:
+    async def test_bounds_concurrent_inference(self, monkeypatch):
+        service = MagicMock()
+        service.embed_query.side_effect = lambda query: [float(len(query))]
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=2)
+        active = 0
+        maximum_active = 0
+
+        async def fake_to_thread(function, *args):
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.01)
+            try:
+                return function(*args)
+            finally:
+                active -= 1
+
+        monkeypatch.setattr("app.embeddings.asyncio.to_thread", fake_to_thread)
+
+        results = await asyncio.gather(*(executor.embed_query(str(index)) for index in range(6)))
+
+        assert maximum_active == 2
+        assert results == [[1.0]] * 6
+
+    def test_rejects_non_positive_concurrency(self):
+        with pytest.raises(ValueError, match="max_concurrency"):
+            AsyncEmbeddingExecutor(MagicMock(), max_concurrency=0)

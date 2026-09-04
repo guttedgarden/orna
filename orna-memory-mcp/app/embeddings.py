@@ -1,9 +1,10 @@
 """Dense embedding service backed by FastEmbed."""
 
+import asyncio
 import math
 from collections.abc import Sequence
 from threading import Lock
-from typing import Any
+from typing import Any, Protocol
 
 from fastembed import TextEmbedding
 
@@ -17,6 +18,14 @@ class EmbeddingOutputError(ValueError):
 
 class ModelCacheMissingError(RuntimeError):
     """Pinned model snapshot отсутствует в configured cache."""
+
+
+class AsyncEmbeddingBackend(Protocol):
+    """Минимальный async contract для application services."""
+
+    async def embed_query(self, query: str) -> list[float]: ...
+
+    async def embed_memory(self, content: str) -> list[float]: ...
 
 
 def ensure_prefix(text: str, prefix: str) -> str:
@@ -136,4 +145,30 @@ class EmbeddingService:
         return values
 
 
+class AsyncEmbeddingExecutor:
+    """Выносит blocking ONNX inference из event loop и ограничивает concurrency."""
+
+    def __init__(self, service: EmbeddingService, max_concurrency: int = 1) -> None:
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
+        self._service = service
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def embed_query(self, query: str) -> list[float]:
+        async with self._semaphore:
+            return await asyncio.to_thread(self._service.embed_query, query)
+
+    async def embed_memory(self, content: str) -> list[float]:
+        async with self._semaphore:
+            return await asyncio.to_thread(self._service.embed_memory, content)
+
+    async def embed_memories(self, contents: Sequence[str]) -> list[list[float]]:
+        async with self._semaphore:
+            return await asyncio.to_thread(self._service.embed_memories, contents)
+
+
 embedding_service = EmbeddingService()
+async_embedding_executor = AsyncEmbeddingExecutor(
+    embedding_service,
+    max_concurrency=settings.embedding_max_concurrency,
+)

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # Embedding settings
     embedding_model: str = ACTIVE_EMBEDDING_PROFILE.model_name
     embedding_threads: int = Field(default=2, ge=1)
+    embedding_max_concurrency: int = Field(default=1, ge=1)
     embedding_cache_dir: Path = _REPO_DIR / "data" / "fastembed"
     embedding_local_files_only: bool = True
 
@@ -47,9 +48,9 @@ class Settings(BaseSettings):
     # Search & retrieval settings
     # Параметры плотного (dense) и гибридного (RRF) поиска
     dense_retrieval_strategy: Literal["exact", "hnsw"] = "exact"
-    retrieval_candidate_pool_size: int = 30
-    rrf_k: int = 60
-    hnsw_ef_search: int = 40
+    retrieval_candidate_pool_size: int = Field(default=30, ge=1)
+    rrf_k: int = Field(default=60, ge=1)
+    hnsw_ef_search: int = Field(default=40, ge=1)
     hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "relaxed_order"
 
     # Profile versions
