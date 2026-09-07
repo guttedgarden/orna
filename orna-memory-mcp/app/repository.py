@@ -141,7 +141,11 @@ class MemoryRepository:
                     memory_type,
                 )
 
-        return [(self._hydrate(row), float(row["distance"])) for row in rows]
+        results = [(self._hydrate(row), float(row["distance"])) for row in rows]
+        # Не расширяем SQL ORDER BY: HNSW должен сортировать только по distance operator.
+        # UUID стабилизирует ранги уже выбранного candidate set при равных distance.
+        results.sort(key=lambda result: (result[1], result[0].id.int))
+        return results
 
     async def search_lexical(
         self,

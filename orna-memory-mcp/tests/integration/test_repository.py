@@ -1,7 +1,7 @@
 """Интеграционные тесты PostgreSQL repository и retrieval-каналов."""
 
 from collections.abc import AsyncIterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
@@ -73,6 +73,7 @@ def memory_record(
     *,
     content: str,
     embedding: list[float],
+    record_id: UUID | None = None,
     scope: MemoryScope = MemoryScope.GLOBAL,
     project_id: str | None = None,
     status: MemoryStatus = MemoryStatus.ACTIVE,
@@ -81,7 +82,7 @@ def memory_record(
     """Создаёт валидный insert DTO с реальными lexical/hash representations."""
     record_identifiers = identifiers or []
     return MemoryInsertRecord(
-        id=uuid4(),
+        id=uuid4() if record_id is None else record_id,
         logical_id=uuid4(),
         revision=1,
         supersedes_id=None,
@@ -196,6 +197,39 @@ async def test_search_dense_uses_configured_strategy_when_override_is_absent(
     results = await repository.search_dense(unit_vector(2), None, 1)
 
     assert [record.id for record, _distance in results] == [expected.id]
+
+
+@pytest.mark.parametrize("strategy", ["exact", "hnsw"])
+async def test_search_dense_stabilizes_equal_distance_ties(
+    repository_database: tuple[Settings, asyncpg.Pool],
+    strategy: str,
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    lower_id = UUID(int=1)
+    higher_id = UUID(int=2)
+    tied_vector = unit_vector(7)
+
+    # Обратный insert order доказывает, что порядок не зависит от natural table order.
+    await repository.insert(
+        memory_record(content="Higher UUID", embedding=tied_vector, record_id=higher_id)
+    )
+    await repository.insert(
+        memory_record(content="Lower UUID", embedding=tied_vector, record_id=lower_id)
+    )
+
+    if strategy == "hnsw":
+        async with pool.acquire() as conn:
+            await conn.execute("SET enable_seqscan = off")
+
+    results = await repository.search_dense(tied_vector, None, 10, strategy=strategy)
+
+    if strategy == "hnsw":
+        async with pool.acquire() as conn:
+            await conn.execute("SET enable_seqscan = on")
+
+    assert [record.id for record, _distance in results] == [lower_id, higher_id]
+    assert [distance for _record, distance in results] == pytest.approx([0.0, 0.0])
 
 
 async def test_search_lexical_handles_identifiers_hyphens_and_visibility(
