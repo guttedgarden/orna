@@ -232,10 +232,16 @@ async def test_search_lexical_handles_identifiers_hyphens_and_visibility(
         "project-a",
         10,
     )
+    split_identifier_results = await repository.search_lexical(
+        normalize_query_to_plain_tokens("response provider executor"),
+        "project-a",
+        10,
+    )
     foo_bar_results = await repository.search_lexical("foo-bar", "project-a", 10)
     request_id_results = await repository.search_lexical("x-request-id", "project-a", 10)
 
     assert [record.id for record, _score in identifier_results] == [executor.id]
+    assert [record.id for record, _score in split_identifier_results] == [executor.id]
     assert [record.id for record, _score in foo_bar_results] == [hyphenated.id]
     assert [record.id for record, _score in request_id_results] == [hyphenated.id]
     assert all(score > 0 for _record, score in identifier_results)

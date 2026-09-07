@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Search & retrieval settings
     # Параметры плотного (dense) и гибридного (RRF) поиска
     dense_retrieval_strategy: Literal["exact", "hnsw"] = "exact"
-    retrieval_candidate_pool_size: int = Field(default=30, ge=1)
+    retrieval_candidate_pool_size: int = Field(default=20, ge=1)
     rrf_k: int = Field(default=60, ge=1)
     hnsw_ef_search: int = Field(default=40, ge=1)
     hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "relaxed_order"

@@ -24,7 +24,7 @@ class TestConfigDefaults:
     def test_default_search_settings(self):
         cfg = Settings(_env_file=None)
         assert cfg.dense_retrieval_strategy == "exact"
-        assert cfg.retrieval_candidate_pool_size == 30
+        assert cfg.retrieval_candidate_pool_size == 20
         assert cfg.rrf_k == 60
         assert cfg.hnsw_ef_search == 40
         assert cfg.hnsw_iterative_scan == "relaxed_order"
