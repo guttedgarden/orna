@@ -50,6 +50,8 @@ async def test_add_prepares_complete_record_before_repository_insert():
 
     assert events == [f"embed:{add_command.content}", "insert"]
     assert result.id != result.logical_id
+    assert result.id.version == 7
+    assert result.logical_id.version == 7
     assert result.revision == 1
     assert result.supersedes_id is None
     assert result.status is MemoryStatus.ACTIVE

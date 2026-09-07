@@ -1,11 +1,10 @@
 """Application service for creating the first revision of a memory."""
 
-from uuid import uuid4
-
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from app.config import Settings
 from app.embeddings import AsyncEmbeddingBackend
+from app.identifiers import new_memory_id
 from app.models import MemoryInsertRecord, MemoryRecord, MemoryScope, MemoryStatus
 from app.normalizer import build_lexical_source, canonical_content_hash
 from app.repository import MemoryRepository
@@ -84,8 +83,8 @@ class MemoryWriteService:
         # ONNX inference завершается до того, как repository заберёт DB connection.
         embedding = await self._embeddings.embed_memory(command.content)
         record = MemoryInsertRecord(
-            id=uuid4(),
-            logical_id=uuid4(),
+            id=new_memory_id(),
+            logical_id=new_memory_id(),
             revision=1,
             supersedes_id=None,
             scope=command.scope,

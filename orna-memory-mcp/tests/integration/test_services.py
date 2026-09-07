@@ -111,6 +111,9 @@ async def test_write_and_hybrid_search_preserve_project_isolation(
         project_id="legacy-api",
     )
 
+    assert legacy_memory.id.version == 7
+    assert legacy_memory.logical_id.version == 7
+
     results = await searcher.search(
         MemorySearchQuery(
             query="Which database is used for migration tests?",
