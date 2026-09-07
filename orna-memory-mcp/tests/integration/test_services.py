@@ -25,9 +25,9 @@ class DeterministicEmbeddings:
         return vector
 
     @staticmethod
-    async def embed_query(query: str) -> list[float]:
+    async def embed_query(_query: str) -> list[float]:
         vector = [0.0] * EMBEDDING_DIMENSION
-        vector[0 if "базе" in query else 1] = 1.0
+        vector[0] = 1.0
         return vector
 
 
@@ -77,22 +77,30 @@ async def test_write_and_hybrid_search_preserve_project_isolation(
     embeddings = DeterministicEmbeddings()
     writer = MemoryWriteService(repository, embeddings, settings)
     searcher = MemorySearchService(repository, embeddings, settings)
-    relevant = await writer.add(
+    legacy_memory = await writer.add(
         MemoryAddCommand(
-            content="Migration tests must run against MariaDB, not SQLite.",
+            content="Migration tests use MariaDB.",
             scope=MemoryScope.PROJECT,
             memory_type="decision",
             identifiers=["MigrationRunner"],
         ),
-        project_id="project-a",
+        project_id="legacy-api",
     )
-    await writer.add(
+    orna_memory = await writer.add(
         MemoryAddCommand(
-            content="Project B also uses MariaDB.",
+            content="Migration tests use PostgreSQL.",
             scope=MemoryScope.PROJECT,
             memory_type="decision",
         ),
-        project_id="project-b",
+        project_id="orna-memory",
+    )
+    global_memory = await writer.add(
+        MemoryAddCommand(
+            content="Keep migration logs for every project.",
+            scope=MemoryScope.GLOBAL,
+            memory_type="decision",
+        ),
+        project_id="legacy-api",
     )
     await writer.add(
         MemoryAddCommand(
@@ -100,18 +108,20 @@ async def test_write_and_hybrid_search_preserve_project_isolation(
             scope=MemoryScope.PROJECT,
             memory_type="fact",
         ),
-        project_id="project-a",
+        project_id="legacy-api",
     )
 
     results = await searcher.search(
         MemorySearchQuery(
-            query="На какой базе гонять миграции?",
+            query="Which database is used for migration tests?",
             memory_type="decision",
             limit=5,
         ),
-        project_id="project-a",
+        project_id="legacy-api",
     )
 
-    assert [result.id for result in results] == [relevant.id]
+    result_ids = [result.id for result in results]
+    assert result_ids == [legacy_memory.id, global_memory.id]
+    assert orna_memory.id not in result_ids
     assert results[0].rank_dense == 1
     assert results[0].rank_lexical is None
