@@ -39,6 +39,11 @@ def ensure_prefix(text: str, prefix: str) -> str:
     return f"{prefix}{current}"
 
 
+def prepare_memory_text(content: str) -> str:
+    """Возвращает точный текст, который memory encoder передаёт tokenizer."""
+    return ensure_prefix(content, ACTIVE_EMBEDDING_PROFILE.passage_prefix)
+
+
 class EmbeddingService:
     """Вычисляет embeddings только в рамках единственного активного profile."""
 
@@ -98,7 +103,7 @@ class EmbeddingService:
 
     def embed_memory(self, content: str) -> list[float]:
         """Векторизует одну memory с canonical ``passage:`` prefix."""
-        prepared_content = ensure_prefix(content, self.profile.passage_prefix)
+        prepared_content = prepare_memory_text(content)
         return self._embed_prepared([prepared_content])[0]
 
     def embed_memories(self, contents: Sequence[str]) -> list[list[float]]:
@@ -110,7 +115,7 @@ class EmbeddingService:
         if not contents:
             return []
 
-        prepared = [ensure_prefix(content, self.profile.passage_prefix) for content in contents]
+        prepared = [prepare_memory_text(content) for content in contents]
         return self._embed_prepared(prepared)
 
     def _embed_prepared(self, prepared_texts: list[str]) -> list[list[float]]:

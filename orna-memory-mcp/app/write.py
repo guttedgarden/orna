@@ -8,6 +8,7 @@ from app.identifiers import new_memory_id
 from app.models import MemoryInsertRecord, MemoryRecord, MemoryScope, MemoryStatus
 from app.normalizer import build_lexical_source, canonical_content_hash
 from app.repository import MemoryRepository
+from app.write_safety import MemoryWriteSafety
 
 
 class ProjectContextError(ValueError):
@@ -58,10 +59,12 @@ class MemoryWriteService:
         repository: MemoryRepository,
         embeddings: AsyncEmbeddingBackend,
         settings: Settings,
+        safety: MemoryWriteSafety,
     ) -> None:
         self._repository = repository
         self._embeddings = embeddings
         self._settings = settings
+        self._safety = safety
 
     async def add(self, command: MemoryAddCommand, project_id: str | None) -> MemoryRecord:
         """Создаёт первую active revision; project_id приходит только из server context."""
@@ -72,6 +75,13 @@ class MemoryWriteService:
             if project_id != project_id.strip():
                 raise ProjectContextError("project context must not have surrounding whitespace")
             record_project_id = project_id
+
+        self._safety.validate(
+            content=command.content,
+            memory_type=command.memory_type,
+            tags=command.tags,
+            identifiers=command.identifiers,
+        )
 
         content_hash = canonical_content_hash(command.content)
         lexical_source = build_lexical_source(

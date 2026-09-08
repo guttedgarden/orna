@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.testclient import TestClient
@@ -23,9 +23,12 @@ def test_http_app_owns_production_database_pool_lifecycle(monkeypatch):
     pool = AsyncMock()
     create_db_pool = AsyncMock(return_value=pool)
     monkeypatch.setattr(mcp_server_module, "create_db_pool", create_db_pool)
+    length_guard = MagicMock()
+    monkeypatch.setattr(mcp_server_module, "E5LengthGuard", length_guard)
     app = create_http_app(config)
 
     with TestClient(app, base_url="http://127.0.0.1:8000"):
         create_db_pool.assert_awaited_once_with(config)
 
     pool.close.assert_awaited_once_with()
+    length_guard.assert_called_once_with(config)

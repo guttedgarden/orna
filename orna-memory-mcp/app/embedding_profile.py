@@ -11,6 +11,7 @@ class EmbeddingProfile:
     version: str
     model_name: str
     dimension: int
+    max_input_tokens: int
     query_prefix: str
     passage_prefix: str
     source_repository: str
@@ -27,6 +28,7 @@ ACTIVE_EMBEDDING_PROFILE = EmbeddingProfile(
     version="e5-v1",
     model_name="intfloat/multilingual-e5-large",
     dimension=1024,
+    max_input_tokens=512,
     query_prefix="query: ",
     passage_prefix="passage: ",
     source_repository="qdrant/multilingual-e5-large-onnx",

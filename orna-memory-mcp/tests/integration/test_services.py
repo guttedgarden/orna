@@ -31,6 +31,14 @@ class DeterministicEmbeddings:
         return vector
 
 
+class AllowAllSafety:
+    """Application integration double; real tokenizer contract has dedicated tests."""
+
+    @staticmethod
+    def validate(**_values: object) -> None:
+        return None
+
+
 @pytest.fixture
 async def service_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
     base_settings = Settings()
@@ -75,7 +83,7 @@ async def test_write_and_hybrid_search_preserve_project_isolation(
     settings, pool = service_database
     repository = MemoryRepository(pool, settings)
     embeddings = DeterministicEmbeddings()
-    writer = MemoryWriteService(repository, embeddings, settings)
+    writer = MemoryWriteService(repository, embeddings, settings, AllowAllSafety())
     searcher = MemorySearchService(repository, embeddings, settings)
     legacy_memory = await writer.add(
         MemoryAddCommand(

@@ -14,15 +14,18 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.tools import Tool
 from mcp_types import ToolAnnotations
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 
 from app.auth import StaticBearerTokenVerifier
 from app.config import Settings
 from app.db import create_db_pool
+from app.embeddings import AsyncEmbeddingExecutor, EmbeddingService
 from app.models import MemoryScope, MemoryStatus
 from app.project_context import ProjectHeaderError, resolve_project_header
 from app.repository import MemoryRepository
+from app.write import MemoryAddCommand, MemoryWriteService
+from app.write_safety import E5LengthGuard, MemorySafetyError, MemoryWriteSafety
 
 MCP_PATH = "/mcp"
 
@@ -32,6 +35,7 @@ class MCPDependencies:
     """Request-independent dependencies с lifecycle, принадлежащим MCP server."""
 
     repository: MemoryRepository
+    write_service: MemoryWriteService | None
 
 
 class MemoryGetResult(BaseModel):
@@ -58,6 +62,7 @@ class MemoryGetResult(BaseModel):
 def _create_lifespan(
     config: Settings,
     repository: MemoryRepository | None,
+    write_service: MemoryWriteService | None,
 ) -> Callable[
     [MCPServer[MCPDependencies]],
     AbstractAsyncContextManager[MCPDependencies],
@@ -65,12 +70,27 @@ def _create_lifespan(
     @asynccontextmanager
     async def lifespan(_server: MCPServer[MCPDependencies]) -> AsyncIterator[MCPDependencies]:
         if repository is not None:
-            yield MCPDependencies(repository=repository)
+            yield MCPDependencies(repository=repository, write_service=write_service)
             return
 
         pool = await create_db_pool(config)
         try:
-            yield MCPDependencies(repository=MemoryRepository(pool, config))
+            production_repository = MemoryRepository(pool, config)
+            embedding_service = EmbeddingService(config)
+            embeddings = AsyncEmbeddingExecutor(
+                embedding_service,
+                max_concurrency=config.embedding_max_concurrency,
+            )
+            safety = MemoryWriteSafety(E5LengthGuard(config))
+            yield MCPDependencies(
+                repository=production_repository,
+                write_service=MemoryWriteService(
+                    production_repository,
+                    embeddings,
+                    config,
+                    safety,
+                ),
+            )
         finally:
             await pool.close()
 
@@ -112,10 +132,75 @@ def _create_memory_get_tool() -> Tool:
     return tool
 
 
+def _create_memory_add_tool() -> Tool:
+    async def memory_add(
+        content: str,
+        memory_type: str,
+        # MCP 2.1.1 берёт default для public schema прямо из сигнатуры функции.
+        # Эти списки не изменяются: MemoryAddCommand создаёт собственные копии.
+        tags: list[str] = [],  # noqa: B006
+        identifiers: list[str] = [],  # noqa: B006
+        *,
+        ctx: Context[MCPDependencies, Any],
+    ) -> MemoryGetResult:
+        """Store durable, non-obvious engineering experience for the current project.
+
+        Records are always project-scoped. Credentials are forbidden. Summarize long text
+        into a durable claim before writing.
+        """
+        try:
+            project_id = resolve_project_header(ctx.headers)
+        except ProjectHeaderError as exc:
+            raise ToolError(str(exc)) from exc
+
+        write_service = ctx.request_context.lifespan_context.write_service
+        if write_service is None:
+            raise ToolError("memory writes are unavailable")
+
+        try:
+            command = MemoryAddCommand(
+                content=content,
+                scope=MemoryScope.PROJECT,
+                memory_type=memory_type,
+                tags=tags,
+                identifiers=identifiers,
+                provenance={
+                    "created_by": "codex",
+                    "source": {"kind": "agent_explicit_add"},
+                    "project_id": project_id,
+                },
+            )
+            record = await write_service.add(command, project_id=project_id)
+        except ValidationError as exc:
+            raise ToolError("invalid memory arguments") from exc
+        except MemorySafetyError as exc:
+            raise ToolError(str(exc)) from exc
+
+        return MemoryGetResult.model_validate(record)
+
+    tool = Tool.from_function(
+        memory_add,
+        name="memory_add",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    argument_model = tool.fn_metadata.arg_model
+    argument_model.model_config["extra"] = "forbid"
+    argument_model.model_rebuild(force=True)
+    tool.parameters = argument_model.model_json_schema(by_alias=True)
+    return tool
+
+
 def create_mcp_server(
     config: Settings,
     *,
     repository: MemoryRepository | None = None,
+    write_service: MemoryWriteService | None = None,
 ) -> MCPServer[MCPDependencies]:
     """Создаёт MCP server с обязательной static Bearer authentication."""
     verifier = StaticBearerTokenVerifier(config.orna_memory_token)
@@ -131,8 +216,8 @@ def create_mcp_server(
         "orna-memory",
         token_verifier=verifier,
         auth=auth,
-        tools=[_create_memory_get_tool()],
-        lifespan=_create_lifespan(config, repository),
+        tools=[_create_memory_get_tool(), _create_memory_add_tool()],
+        lifespan=_create_lifespan(config, repository, write_service),
     )
 
 
@@ -140,9 +225,14 @@ def create_http_app(
     config: Settings,
     *,
     repository: MemoryRepository | None = None,
+    write_service: MemoryWriteService | None = None,
 ) -> Starlette:
     """Собирает JSON-response Streamable HTTP app без transport session state."""
-    server = create_mcp_server(config, repository=repository)
+    server = create_mcp_server(
+        config,
+        repository=repository,
+        write_service=write_service,
+    )
     return server.streamable_http_app(
         streamable_http_path=MCP_PATH,
         json_response=True,

@@ -2,12 +2,15 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, call
 from uuid import UUID, uuid4
 
+import pytest
 from starlette.testclient import TestClient
 
 from app.config import Settings
 from app.mcp_server import create_http_app
 from app.models import EMBEDDING_DIMENSION, MemoryRecord, MemoryScope, MemoryStatus
 from app.repository import MemoryRepository
+from app.write import MemoryAddCommand, MemoryWriteService
+from app.write_safety import PROBABLE_SECRET_MESSAGE, ProbableSecretError
 
 _PROTOCOL_VERSION = "2026-07-28"
 
@@ -50,11 +53,32 @@ def _tools_call_request(memory_id: str, **extra_arguments: object) -> dict[str, 
     }
 
 
+def _memory_add_request(**arguments: object) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "memory_add",
+            "arguments": arguments,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": _PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "orna-memory-test",
+                    "version": "1.0",
+                },
+            },
+        },
+    }
+
+
 def _mcp_headers(
     token: str | None = None,
     *,
     method: str = "tools/list",
     project_id: str | None = None,
+    tool_name: str = "memory_get",
 ) -> dict[str, str]:
     headers = {
         "Accept": "application/json",
@@ -64,7 +88,7 @@ def _mcp_headers(
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
     if method == "tools/call":
-        headers["Mcp-Name"] = "memory_get"
+        headers["Mcp-Name"] = tool_name
     if project_id is not None:
         headers["X-Memory-Project"] = project_id
     return headers
@@ -76,6 +100,10 @@ def _settings(token: str) -> Settings:
 
 def _repository() -> AsyncMock:
     return AsyncMock(spec=MemoryRepository)
+
+
+def _write_service() -> AsyncMock:
+    return AsyncMock(spec=MemoryWriteService)
 
 
 def _memory_record() -> MemoryRecord:
@@ -150,14 +178,34 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
     assert response.status_code == 200, response.text
     assert response.json()["id"] == 1
     tools = response.json()["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["memory_get"]
-    assert tools[0]["inputSchema"]["additionalProperties"] is False
-    assert tools[0]["inputSchema"]["required"] == ["memory_id"]
-    assert tools[0]["inputSchema"]["properties"]["memory_id"]["format"] == "uuid"
-    assert tools[0]["annotations"]["readOnlyHint"] is True
-    assert "embedding" not in tools[0]["outputSchema"]["properties"]
-    assert "lexical_source" not in tools[0]["outputSchema"]["properties"]
-    assert "content_hash" not in tools[0]["outputSchema"]["properties"]
+    assert [tool["name"] for tool in tools] == ["memory_get", "memory_add"]
+    memory_get, memory_add = tools
+    assert memory_get["inputSchema"]["additionalProperties"] is False
+    assert memory_get["inputSchema"]["required"] == ["memory_id"]
+    assert memory_get["inputSchema"]["properties"]["memory_id"]["format"] == "uuid"
+    assert memory_get["annotations"]["readOnlyHint"] is True
+    assert "embedding" not in memory_get["outputSchema"]["properties"]
+    assert "lexical_source" not in memory_get["outputSchema"]["properties"]
+    assert "content_hash" not in memory_get["outputSchema"]["properties"]
+    assert memory_add["inputSchema"]["additionalProperties"] is False
+    assert set(memory_add["inputSchema"]["properties"]) == {
+        "content",
+        "memory_type",
+        "tags",
+        "identifiers",
+    }
+    assert memory_add["inputSchema"]["required"] == ["content", "memory_type"]
+    assert memory_add["inputSchema"]["properties"]["tags"]["default"] == []
+    assert memory_add["inputSchema"]["properties"]["identifiers"]["default"] == []
+    assert memory_add["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    assert "durable" in memory_add["description"]
+    assert "always project-scoped" in memory_add["description"]
+    assert "Credentials are forbidden" in memory_add["description"]
     assert "mcp-session-id" not in response.headers
 
 
@@ -333,3 +381,179 @@ def test_memory_get_rejects_duplicate_project_header_without_repository_call():
     assert result["isError"] is True
     assert "must be provided exactly once" in result["content"][0]["text"]
     repository.get_by_id.assert_not_awaited()
+
+
+def test_memory_add_is_project_scoped_with_server_owned_provenance_and_db_timestamp():
+    repository = _repository()
+    write_service = _write_service()
+    record = _memory_record().model_copy(
+        update={
+            "revision": 1,
+            "supersedes_id": None,
+            "status": MemoryStatus.ACTIVE,
+            "content": "Use PostgreSQL for migration tests.",
+            "tags": ["database"],
+            "identifiers": ["MigrationRunner"],
+            "provenance": {
+                "created_by": "codex",
+                "source": {"kind": "agent_explicit_add"},
+                "project_id": "project-a",
+            },
+            "status_changed_at": None,
+        }
+    )
+    write_service.add.return_value = record
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(
+                content=record.content,
+                memory_type="decision",
+                tags=record.tags,
+                identifiers=record.identifiers,
+            ),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_add",
+            ),
+        )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["created_at"] == "2026-09-08T12:00:00Z"
+    assert result["structuredContent"]["provenance"] == record.provenance
+    assert "created_at" not in result["structuredContent"]["provenance"]
+    for internal_field in (
+        "embedding",
+        "content_hash",
+        "lexical_source",
+        "embedding_model",
+        "embedding_profile_version",
+        "lexical_profile_version",
+    ):
+        assert internal_field not in result["structuredContent"]
+    assert "mcp-session-id" not in response.headers
+
+    write_service.add.assert_awaited_once()
+    (command,) = write_service.add.await_args.args
+    assert isinstance(command, MemoryAddCommand)
+    assert command.scope is MemoryScope.PROJECT
+    assert command.provenance == record.provenance
+    assert write_service.add.await_args.kwargs == {"project_id": "project-a"}
+
+
+@pytest.mark.parametrize(
+    ("project_id", "message"),
+    [
+        (None, "X-Memory-Project header is required"),
+        ("invalid project", "X-Memory-Project header must be a canonical project id"),
+    ],
+)
+def test_memory_add_rejects_invalid_project_header_before_write(project_id, message):
+    repository = _repository()
+    write_service = _write_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(content="Safe memory", memory_type="decision"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id=project_id,
+                tool_name="memory_add",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert message in result["content"][0]["text"]
+    write_service.add.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+def test_memory_add_safety_error_is_publicly_safe():
+    repository = _repository()
+    write_service = _write_service()
+    rejected = "password=example-value"
+    write_service.add.side_effect = ProbableSecretError(PROBABLE_SECRET_MESSAGE)
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(content=rejected, memory_type="decision"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_add",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert PROBABLE_SECRET_MESSAGE in result["content"][0]["text"]
+    assert rejected not in result["content"][0]["text"]
+    assert repository.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope", "global"),
+        ("project_id", "other"),
+        ("created_at", "2026-09-08T12:00:00Z"),
+        ("provenance", {"created_by": "caller"}),
+        ("embedding", [1.0]),
+    ],
+)
+def test_memory_add_rejects_forbidden_extra_arguments_before_write(field, value):
+    repository = _repository()
+    write_service = _write_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+    arguments = {
+        "content": "Use PostgreSQL for migration tests.",
+        "memory_type": "decision",
+        field: value,
+    }
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(**arguments),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_add",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert field in result["content"][0]["text"]
+    write_service.add.assert_not_awaited()
+    assert repository.mock_calls == []

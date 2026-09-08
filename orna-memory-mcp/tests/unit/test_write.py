@@ -7,6 +7,7 @@ from app.config import Settings
 from app.models import EMBEDDING_DIMENSION, MemoryScope, MemoryStatus
 from app.normalizer import build_lexical_source, canonical_content_hash
 from app.write import MemoryAddCommand, MemoryWriteService, ProjectContextError
+from app.write_safety import MemoryTooLongError
 
 
 def embedding() -> list[float]:
@@ -26,6 +27,10 @@ def command(**overrides: object) -> MemoryAddCommand:
     return MemoryAddCommand.model_validate(values)
 
 
+def allow_safety() -> MagicMock:
+    return MagicMock()
+
+
 async def test_add_prepares_complete_record_before_repository_insert():
     events: list[str] = []
     embeddings = MagicMock()
@@ -43,12 +48,20 @@ async def test_add_prepares_complete_record_before_repository_insert():
     embeddings.embed_memory = AsyncMock(side_effect=embed_memory)
     repository.insert = AsyncMock(side_effect=insert)
     settings = Settings(_env_file=None)
-    service = MemoryWriteService(repository, embeddings, settings)
+    safety = allow_safety()
+    safety.validate.side_effect = lambda **_kwargs: events.append("safety")
+    service = MemoryWriteService(repository, embeddings, settings, safety)
     add_command = command()
 
     result = await service.add(add_command, project_id="project-a")
 
-    assert events == [f"embed:{add_command.content}", "insert"]
+    assert events == ["safety", f"embed:{add_command.content}", "insert"]
+    safety.validate.assert_called_once_with(
+        content=add_command.content,
+        memory_type=add_command.memory_type,
+        tags=add_command.tags,
+        identifiers=add_command.identifiers,
+    )
     assert result.id != result.logical_id
     assert result.id.version == 7
     assert result.logical_id.version == 7
@@ -74,7 +87,12 @@ async def test_global_add_does_not_persist_project_context():
     embeddings.embed_memory = AsyncMock(return_value=embedding())
     repository = MagicMock()
     repository.insert = AsyncMock(side_effect=lambda record: record)
-    service = MemoryWriteService(repository, embeddings, Settings(_env_file=None))
+    service = MemoryWriteService(
+        repository,
+        embeddings,
+        Settings(_env_file=None),
+        allow_safety(),
+    )
 
     result = await service.add(command(scope=MemoryScope.GLOBAL), project_id="project-a")
 
@@ -88,11 +106,31 @@ async def test_project_add_requires_canonical_project_context(project_id):
     embeddings.embed_memory = AsyncMock(return_value=embedding())
     repository = MagicMock()
     repository.insert = AsyncMock()
-    service = MemoryWriteService(repository, embeddings, Settings(_env_file=None))
+    safety = allow_safety()
+    service = MemoryWriteService(repository, embeddings, Settings(_env_file=None), safety)
 
     with pytest.raises(ProjectContextError, match="project context"):
         await service.add(command(), project_id=project_id)
 
+    embeddings.embed_memory.assert_not_awaited()
+    repository.insert.assert_not_awaited()
+    safety.validate.assert_not_called()
+
+
+async def test_safety_rejection_happens_before_embedding_and_repository():
+    rejected_content = "do not reflect this value"
+    embeddings = MagicMock()
+    embeddings.embed_memory = AsyncMock(return_value=embedding())
+    repository = MagicMock()
+    repository.insert = AsyncMock()
+    safety = allow_safety()
+    safety.validate.side_effect = MemoryTooLongError("safe public error")
+    service = MemoryWriteService(repository, embeddings, Settings(_env_file=None), safety)
+
+    with pytest.raises(MemoryTooLongError, match="safe public error") as error:
+        await service.add(command(content=rejected_content), project_id="project-a")
+
+    assert rejected_content not in str(error.value)
     embeddings.embed_memory.assert_not_awaited()
     repository.insert.assert_not_awaited()
 
