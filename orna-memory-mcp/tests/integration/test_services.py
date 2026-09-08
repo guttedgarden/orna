@@ -186,6 +186,23 @@ async def test_multilingual_query_finds_english_memory_with_real_pinned_e5(
         ),
         project_id="test-project",
     )
+    distractor_contents = (
+        "Frontend snapshot tests must run in Chromium, not Firefox.",
+        "Background jobs retry transient failures three times.",
+        "API response caches expire after fifteen minutes.",
+        "Deployment artifacts must be signed before release.",
+        "Application logs are retained for thirty days.",
+    )
+    for content in distractor_contents:
+        await writer.add(
+            MemoryAddCommand(
+                content=content,
+                scope=MemoryScope.PROJECT,
+                memory_type="convention",
+            ),
+            project_id="test-project",
+        )
+
     results = await searcher.search(
         MemorySearchQuery(
             query="На какой базе нужно запускать тесты миграций?",
@@ -194,7 +211,8 @@ async def test_multilingual_query_finds_english_memory_with_real_pinned_e5(
         project_id="test-project",
     )
 
-    assert stored.id in [result.id for result in results[:5]]
-    stored_result = next(result for result in results if result.id == stored.id)
+    assert len(results) == 5
+    assert results[0].id == stored.id
+    stored_result = results[0]
     assert stored_result.rank_dense == 1
     assert stored_result.rank_lexical is None
