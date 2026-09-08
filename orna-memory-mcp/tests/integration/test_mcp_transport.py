@@ -7,8 +7,15 @@ from starlette.testclient import TestClient
 
 from app.config import Settings
 from app.mcp_server import INVALID_TOOL_ARGUMENTS_MESSAGE, create_http_app
-from app.models import EMBEDDING_DIMENSION, MemoryRecord, MemoryScope, MemoryStatus
+from app.models import (
+    EMBEDDING_DIMENSION,
+    MemoryRecord,
+    MemoryScope,
+    MemorySearchResult,
+    MemoryStatus,
+)
 from app.repository import MemoryRepository
+from app.search import MemorySearchQuery, MemorySearchService
 from app.write import MemoryAddCommand, MemoryWriteService
 from app.write_safety import PROBABLE_SECRET_MESSAGE, ProbableSecretError
 
@@ -73,6 +80,26 @@ def _memory_add_request(**arguments: object) -> dict[str, object]:
     }
 
 
+def _memory_search_request(**arguments: object) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "memory_search",
+            "arguments": arguments,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": _PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "orna-memory-test",
+                    "version": "1.0",
+                },
+            },
+        },
+    }
+
+
 def _mcp_headers(
     token: str | None = None,
     *,
@@ -106,6 +133,10 @@ def _write_service() -> AsyncMock:
     return AsyncMock(spec=MemoryWriteService)
 
 
+def _search_service() -> AsyncMock:
+    return AsyncMock(spec=MemorySearchService)
+
+
 def _memory_record() -> MemoryRecord:
     memory_id = UUID("019cff03-d6db-7772-89b8-e18dc19a9038")
     return MemoryRecord(
@@ -129,6 +160,27 @@ def _memory_record() -> MemoryRecord:
         provenance={"source": "integration-test"},
         created_at=datetime(2026, 9, 8, 12, 0, tzinfo=UTC),
         status_changed_at=datetime(2026, 9, 8, 13, 0, tzinfo=UTC),
+    )
+
+
+def _search_result(record: MemoryRecord) -> MemorySearchResult:
+    return MemorySearchResult(
+        id=record.id,
+        logical_id=record.logical_id,
+        revision=record.revision,
+        scope=record.scope,
+        project_id=record.project_id,
+        memory_type=record.memory_type,
+        status=record.status,
+        content=record.content,
+        tags=list(record.tags),
+        identifiers=list(record.identifiers),
+        provenance=dict(record.provenance),
+        rrf_score=0.031,
+        rank_dense=1,
+        rank_lexical=2,
+        distance=0.12,
+        lexical_score=0.5,
     )
 
 
@@ -178,12 +230,19 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
     assert response.status_code == 200, response.text
     assert response.json()["id"] == 1
     tools = response.json()["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["memory_get", "memory_add"]
-    memory_get, memory_add = tools
+    assert [tool["name"] for tool in tools] == [
+        "memory_get",
+        "memory_add",
+        "memory_search",
+    ]
+    memory_get, memory_add, memory_search = tools
     assert memory_get["inputSchema"]["additionalProperties"] is False
     assert memory_get["inputSchema"]["required"] == ["memory_id"]
     assert memory_get["inputSchema"]["properties"]["memory_id"]["format"] == "uuid"
-    assert memory_get["annotations"]["readOnlyHint"] is True
+    assert memory_get["annotations"] == {
+        "readOnlyHint": True,
+        "openWorldHint": False,
+    }
     assert "embedding" not in memory_get["outputSchema"]["properties"]
     assert "lexical_source" not in memory_get["outputSchema"]["properties"]
     assert "content_hash" not in memory_get["outputSchema"]["properties"]
@@ -206,6 +265,32 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
     assert "durable" in memory_add["description"]
     assert "always project-scoped" in memory_add["description"]
     assert "Credentials are forbidden" in memory_add["description"]
+    assert memory_search["inputSchema"]["additionalProperties"] is False
+    assert set(memory_search["inputSchema"]["properties"]) == {"query", "memory_type"}
+    assert memory_search["inputSchema"]["required"] == ["query"]
+    assert memory_search["inputSchema"]["properties"]["memory_type"]["default"] is None
+    assert memory_search["annotations"] == {
+        "readOnlyHint": True,
+        "openWorldHint": False,
+    }
+    assert memory_search["outputSchema"]["required"] == ["results"]
+    assert set(memory_search["outputSchema"]["properties"]) == {"results"}
+    output_schema = str(memory_search["outputSchema"])
+    for internal_field in (
+        "embedding",
+        "content_hash",
+        "lexical_source",
+        "rrf_score",
+        "rank_dense",
+        "rank_lexical",
+        "distance",
+        "lexical_score",
+    ):
+        assert internal_field not in output_schema
+    assert "durable project experience" in memory_search["description"]
+    assert "applicable global memories" in memory_search["description"]
+    assert "memory_type" in memory_search["description"]
+    assert "at most 5" in memory_search["description"]
     assert "mcp-session-id" not in response.headers
 
 
@@ -627,3 +712,271 @@ def test_memory_add_rejects_invalid_allowed_argument_without_reflecting_sensitiv
     assert "errors.pydantic.dev" not in error_text
     write_service.add.assert_not_awaited()
     assert repository.mock_calls == []
+
+
+def test_memory_search_uses_project_context_and_returns_public_wrapper():
+    repository = _repository()
+    search_service = _search_service()
+    project_record = _memory_record().model_copy(update={"status": MemoryStatus.ACTIVE})
+    global_record = project_record.model_copy(
+        update={
+            "id": UUID("019cff03-d6db-7772-89b8-e18dc19a9040"),
+            "logical_id": UUID("019cff03-d6db-7772-89b8-e18dc19a9041"),
+            "scope": MemoryScope.GLOBAL,
+            "project_id": None,
+            "content": "Keep migration logs for every project.",
+        }
+    )
+    search_service.search.return_value = [
+        _search_result(project_record),
+        _search_result(global_record),
+    ]
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(query="migration database", memory_type="decision"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_search",
+            ),
+        )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"] == {
+        "results": [
+            {
+                "id": str(project_record.id),
+                "logical_id": str(project_record.logical_id),
+                "revision": project_record.revision,
+                "scope": "project",
+                "project_id": "project-a",
+                "memory_type": "decision",
+                "status": "active",
+                "content": project_record.content,
+                "tags": project_record.tags,
+                "identifiers": project_record.identifiers,
+                "provenance": project_record.provenance,
+            },
+            {
+                "id": str(global_record.id),
+                "logical_id": str(global_record.logical_id),
+                "revision": global_record.revision,
+                "scope": "global",
+                "project_id": None,
+                "memory_type": "decision",
+                "status": "active",
+                "content": global_record.content,
+                "tags": global_record.tags,
+                "identifiers": global_record.identifiers,
+                "provenance": global_record.provenance,
+            },
+        ]
+    }
+    for internal_field in (
+        "embedding",
+        "content_hash",
+        "lexical_source",
+        "rrf_score",
+        "rank_dense",
+        "rank_lexical",
+        "distance",
+        "lexical_score",
+    ):
+        assert internal_field not in result["structuredContent"]["results"][0]
+    search_service.search.assert_awaited_once()
+    (search_query,) = search_service.search.await_args.args
+    assert search_query == MemorySearchQuery(
+        query="migration database",
+        memory_type="decision",
+        limit=5,
+    )
+    assert search_service.search.await_args.kwargs == {"project_id": "project-a"}
+    assert repository.mock_calls == []
+    assert "mcp-session-id" not in response.headers
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("limit", 100),
+        ("project_id", "other"),
+        ("scope", "global"),
+        ("rrf_k", 1),
+        ("unknown", True),
+    ],
+)
+def test_memory_search_rejects_forbidden_extra_arguments_before_search(field, value):
+    repository = _repository()
+    search_service = _search_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+    arguments = {"query": "migration database", field: value}
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(**arguments),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_search",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == INVALID_TOOL_ARGUMENTS_MESSAGE
+    assert str(value) not in result["content"][0]["text"]
+    search_service.search.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"query": ""},
+        {"query": "   "},
+        {"query": "migration database", "memory_type": ""},
+        {"query": "migration database", "memory_type": " convention"},
+    ],
+)
+def test_memory_search_rejects_blank_query_and_invalid_memory_type(arguments):
+    repository = _repository()
+    search_service = _search_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(**arguments),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_search",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert result["content"][0]["text"].endswith("invalid memory search arguments")
+    search_service.search.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    ("project_id", "message"),
+    [
+        (None, "X-Memory-Project header is required"),
+        ("invalid project", "X-Memory-Project header must be a canonical project id"),
+    ],
+)
+def test_memory_search_rejects_invalid_project_header_before_search(project_id, message):
+    repository = _repository()
+    search_service = _search_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(query="migration database"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id=project_id,
+                tool_name="memory_search",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert message in result["content"][0]["text"]
+    search_service.search.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+def test_memory_search_rejects_duplicate_project_header_before_search():
+    repository = _repository()
+    search_service = _search_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+    headers = list(
+        _mcp_headers(
+            "correct-token",
+            method="tools/call",
+            tool_name="memory_search",
+        ).items()
+    )
+    headers.extend(
+        [
+            ("X-Memory-Project", "project-a"),
+            ("X-Memory-Project", "project-b"),
+        ]
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(query="migration database"),
+            headers=headers,
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert "must be provided exactly once" in result["content"][0]["text"]
+    search_service.search.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+def test_memory_search_unexpected_failure_does_not_expose_internal_diagnostics():
+    repository = _repository()
+    search_service = _search_service()
+    internal_diagnostic = "SELECT embedding FROM memories password=database-secret"
+    search_service.search.side_effect = RuntimeError(internal_diagnostic)
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        search_service=search_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_search_request(query="migration database"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_search",
+            ),
+        )
+
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert internal_diagnostic not in result["content"][0]["text"]
+    assert "SELECT" not in result["content"][0]["text"]

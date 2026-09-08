@@ -1,6 +1,8 @@
 """Интеграционный тест application services поверх реального PostgreSQL."""
 
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from uuid import uuid4
 
 import asyncpg
@@ -8,10 +10,13 @@ import pytest
 
 from app.config import Settings
 from app.db import init_connection, run_database_migrations
+from app.embedding_profile import ACTIVE_EMBEDDING_PROFILE
+from app.embeddings import AsyncEmbeddingExecutor, EmbeddingService
 from app.models import EMBEDDING_DIMENSION, MemoryScope
 from app.repository import MemoryRepository
 from app.search import MemorySearchQuery, MemorySearchService
 from app.write import MemoryAddCommand, MemoryWriteService
+from app.write_safety import E5LengthGuard, MemoryWriteSafety
 
 
 class DeterministicEmbeddings:
@@ -37,6 +42,18 @@ class AllowAllSafety:
     @staticmethod
     def validate(**_values: object) -> None:
         return None
+
+
+def _required_real_e5_cache_dir() -> Path:
+    configured = os.environ.get("ORNA_TEST_E5_CACHE_DIR")
+    cache_dir = Path(configured) if configured else Settings(_env_file=None).embedding_cache_dir
+    snapshot = ACTIVE_EMBEDDING_PROFILE.snapshot_path(cache_dir)
+    if not snapshot.is_dir():
+        raise AssertionError(
+            "pinned E5 cache unavailable; run the documented model-cache workflow and set "
+            "ORNA_TEST_E5_CACHE_DIR"
+        )
+    return cache_dir
 
 
 @pytest.fixture
@@ -136,3 +153,48 @@ async def test_write_and_hybrid_search_preserve_project_isolation(
     assert orna_memory.id not in result_ids
     assert results[0].rank_dense == 1
     assert results[0].rank_lexical is None
+
+
+async def test_multilingual_query_finds_english_memory_with_real_pinned_e5(
+    service_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = service_database
+    settings = settings.model_copy(
+        update={
+            "embedding_cache_dir": _required_real_e5_cache_dir(),
+            "embedding_local_files_only": True,
+        }
+    )
+    repository = MemoryRepository(pool, settings)
+    embeddings = AsyncEmbeddingExecutor(
+        EmbeddingService(settings),
+        max_concurrency=settings.embedding_max_concurrency,
+    )
+    writer = MemoryWriteService(
+        repository,
+        embeddings,
+        settings,
+        MemoryWriteSafety(E5LengthGuard(settings)),
+    )
+    searcher = MemorySearchService(repository, embeddings, settings)
+
+    stored = await writer.add(
+        MemoryAddCommand(
+            content="Migration tests must run against MariaDB, not SQLite.",
+            scope=MemoryScope.PROJECT,
+            memory_type="convention",
+        ),
+        project_id="test-project",
+    )
+    results = await searcher.search(
+        MemorySearchQuery(
+            query="На какой базе нужно запускать тесты миграций?",
+            limit=5,
+        ),
+        project_id="test-project",
+    )
+
+    assert stored.id in [result.id for result in results[:5]]
+    stored_result = next(result for result in results if result.id == stored.id)
+    assert stored_result.rank_dense == 1
+    assert stored_result.rank_lexical is None

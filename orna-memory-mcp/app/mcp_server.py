@@ -24,6 +24,7 @@ from app.embeddings import AsyncEmbeddingExecutor, EmbeddingService
 from app.models import MemoryScope, MemoryStatus
 from app.project_context import ProjectHeaderError, resolve_project_header
 from app.repository import MemoryRepository
+from app.search import MemorySearchQuery, MemorySearchService
 from app.write import MemoryAddCommand, MemoryWriteService
 from app.write_safety import E5LengthGuard, MemorySafetyError, MemoryWriteSafety
 
@@ -79,6 +80,7 @@ class MCPDependencies:
 
     repository: MemoryRepository
     write_service: MemoryWriteService | None
+    search_service: MemorySearchService | None
 
 
 class MemoryGetResult(BaseModel):
@@ -102,10 +104,37 @@ class MemoryGetResult(BaseModel):
     status_changed_at: datetime | None
 
 
+class MemorySearchResultItem(BaseModel):
+    """Public search item без ranking diagnostics и storage internals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, from_attributes=True)
+
+    id: UUID
+    logical_id: UUID
+    revision: int = Field(ge=1)
+    scope: MemoryScope
+    project_id: str | None
+    memory_type: str
+    status: MemoryStatus
+    content: str
+    tags: list[str]
+    identifiers: list[str]
+    provenance: dict[str, Any]
+
+
+class MemorySearchResponse(BaseModel):
+    """Stable public wrapper for MCP search results."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    results: list[MemorySearchResultItem]
+
+
 def _create_lifespan(
     config: Settings,
     repository: MemoryRepository | None,
     write_service: MemoryWriteService | None,
+    search_service: MemorySearchService | None,
 ) -> Callable[
     [MCPServer[MCPDependencies]],
     AbstractAsyncContextManager[MCPDependencies],
@@ -113,7 +142,11 @@ def _create_lifespan(
     @asynccontextmanager
     async def lifespan(_server: MCPServer[MCPDependencies]) -> AsyncIterator[MCPDependencies]:
         if repository is not None:
-            yield MCPDependencies(repository=repository, write_service=write_service)
+            yield MCPDependencies(
+                repository=repository,
+                write_service=write_service,
+                search_service=search_service,
+            )
             return
 
         pool = await create_db_pool(config)
@@ -132,6 +165,11 @@ def _create_lifespan(
                     embeddings,
                     config,
                     safety,
+                ),
+                search_service=MemorySearchService(
+                    production_repository,
+                    embeddings,
+                    config,
                 ),
             )
         finally:
@@ -224,11 +262,54 @@ def _create_memory_add_tool() -> Tool:
     )
 
 
+def _create_memory_search_tool() -> Tool:
+    async def memory_search(
+        query: str,
+        memory_type: str | None = None,
+        *,
+        ctx: Context[MCPDependencies, Any],
+    ) -> MemorySearchResponse:
+        """Search durable project experience visible to the current project.
+
+        Results include applicable global memories, can be limited by memory_type, and
+        contain at most 5 items.
+        """
+        try:
+            project_id = resolve_project_header(ctx.headers)
+        except ProjectHeaderError as exc:
+            raise ToolError(str(exc)) from exc
+
+        search_service = ctx.request_context.lifespan_context.search_service
+        if search_service is None:
+            raise ToolError("memory search is unavailable")
+
+        try:
+            search_query = MemorySearchQuery(
+                query=query,
+                memory_type=memory_type,
+                limit=5,
+            )
+        except ValidationError as exc:
+            raise ToolError("invalid memory search arguments") from exc
+
+        results = await search_service.search(search_query, project_id=project_id)
+        return MemorySearchResponse(
+            results=[MemorySearchResultItem.model_validate(result) for result in results]
+        )
+
+    return _create_strict_safe_tool(
+        memory_search,
+        name="memory_search",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+
+
 def create_mcp_server(
     config: Settings,
     *,
     repository: MemoryRepository | None = None,
     write_service: MemoryWriteService | None = None,
+    search_service: MemorySearchService | None = None,
 ) -> MCPServer[MCPDependencies]:
     """Создаёт MCP server с обязательной static Bearer authentication."""
     verifier = StaticBearerTokenVerifier(config.orna_memory_token)
@@ -244,8 +325,12 @@ def create_mcp_server(
         "orna-memory",
         token_verifier=verifier,
         auth=auth,
-        tools=[_create_memory_get_tool(), _create_memory_add_tool()],
-        lifespan=_create_lifespan(config, repository, write_service),
+        tools=[
+            _create_memory_get_tool(),
+            _create_memory_add_tool(),
+            _create_memory_search_tool(),
+        ],
+        lifespan=_create_lifespan(config, repository, write_service, search_service),
     )
 
 
@@ -254,12 +339,14 @@ def create_http_app(
     *,
     repository: MemoryRepository | None = None,
     write_service: MemoryWriteService | None = None,
+    search_service: MemorySearchService | None = None,
 ) -> Starlette:
     """Собирает JSON-response Streamable HTTP app без transport session state."""
     server = create_mcp_server(
         config,
         repository=repository,
         write_service=write_service,
+        search_service=search_service,
     )
     return server.streamable_http_app(
         streamable_http_path=MCP_PATH,

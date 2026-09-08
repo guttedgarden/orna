@@ -25,6 +25,9 @@ def test_http_app_owns_production_database_pool_lifecycle(monkeypatch):
     monkeypatch.setattr(mcp_server_module, "create_db_pool", create_db_pool)
     length_guard = MagicMock()
     monkeypatch.setattr(mcp_server_module, "E5LengthGuard", length_guard)
+    search_service = MagicMock()
+    search_service_factory = MagicMock(return_value=search_service)
+    monkeypatch.setattr(mcp_server_module, "MemorySearchService", search_service_factory)
     app = create_http_app(config)
 
     with TestClient(app, base_url="http://127.0.0.1:8000"):
@@ -32,3 +35,8 @@ def test_http_app_owns_production_database_pool_lifecycle(monkeypatch):
 
     pool.close.assert_awaited_once_with()
     length_guard.assert_called_once_with(config)
+    search_service_factory.assert_called_once()
+    repository, embeddings, search_config = search_service_factory.call_args.args
+    assert repository._pool is pool
+    assert embeddings._service.model_name == config.embedding_model
+    assert search_config is config
