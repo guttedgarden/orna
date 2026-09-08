@@ -64,23 +64,29 @@ class E5LengthGuard:
 
 
 class SecretScanner:
-    """Небольшой Phase-1 deny-list очевидных credential patterns."""
+    """Не позволяет сохранить явные секреты доступа в полях, управляемых агентом."""
 
     _patterns = (
         re.compile(r"-----BEGIN (?:[A-Z0-9][A-Z0-9 ]* )?PRIVATE KEY-----"),
         re.compile(
-            r"(?i)\b(?:authorization\s*:\s*)?bearer[ \t]+"
-            r"(?!(?:authentication|token|credential)\b)[A-Za-z0-9._~+/=-]{8,}"
+            r"(?i)\bauthorization\s*:\s*bearer[ \t]+"
+            r"[A-Za-z0-9._~+/=-]{8,}(?![A-Za-z0-9._~+/=-])"
         ),
         re.compile(
-            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\."
-            r"[A-Za-z0-9_-]{4,}(?![A-Za-z0-9_-])"
+            r"(?i)\bbearer[ \t]+(?=[A-Za-z0-9._~+/=-]{8,}(?![A-Za-z0-9._~+/=-]))"
+            r"(?=[A-Za-z0-9._~+/=-]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}"
+            r"(?![A-Za-z0-9._~+/=-])"
+        ),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\."
+            r"[A-Za-z0-9_-]+(?![A-Za-z0-9_-])"
         ),
         re.compile(r"(?<![A-Za-z0-9_-])sk-(?!learn\b)[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])"),
         re.compile(r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{20,}(?![A-Za-z0-9_])"),
         re.compile(r"(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
         re.compile(
-            r"(?i)\b(?:password|passwd|pwd|api[ _-]?key)\s*(?:=|:)\s*"
+            r"(?i)(?<![A-Za-z0-9_])[\"']?(?:password|passwd|pwd|api[ _-]?key)[\"']?"
+            r"\s*(?:=|:)\s*"
             r"(?:\"[^\"\s]+\"|'[^'\s]+'|[^\s,;]+)"
         ),
     )

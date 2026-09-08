@@ -6,7 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app.config import Settings
-from app.mcp_server import create_http_app
+from app.mcp_server import INVALID_TOOL_ARGUMENTS_MESSAGE, create_http_app
 from app.models import EMBEDDING_DIMENSION, MemoryRecord, MemoryScope, MemoryStatus
 from app.repository import MemoryRepository
 from app.write import MemoryAddCommand, MemoryWriteService
@@ -329,7 +329,7 @@ def test_memory_get_rejects_extra_arguments_before_repository_call():
 
     result = response.json()["result"]
     assert result["isError"] is True
-    assert "project_id" in result["content"][0]["text"]
+    assert result["content"][0]["text"] == INVALID_TOOL_ARGUMENTS_MESSAGE
     repository.get_by_id.assert_not_awaited()
 
 
@@ -350,7 +350,8 @@ def test_memory_get_rejects_invalid_uuid_before_repository_call():
 
     result = response.json()["result"]
     assert result["isError"] is True
-    assert "memory_id" in result["content"][0]["text"]
+    assert result["content"][0]["text"] == INVALID_TOOL_ARGUMENTS_MESSAGE
+    assert "not-a-uuid" not in result["content"][0]["text"]
     repository.get_by_id.assert_not_awaited()
 
 
@@ -486,6 +487,36 @@ def test_memory_add_rejects_invalid_project_header_before_write(project_id, mess
     assert repository.mock_calls == []
 
 
+def test_memory_add_preserves_handler_tool_error_for_invalid_domain_arguments():
+    repository = _repository()
+    write_service = _write_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(content="", memory_type="decision"),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_add",
+            ),
+        )
+
+    result = response.json()["result"]
+    error_text = result["content"][0]["text"]
+    assert result["isError"] is True
+    assert error_text.endswith("invalid memory arguments")
+    assert error_text != INVALID_TOOL_ARGUMENTS_MESSAGE
+    write_service.add.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
 def test_memory_add_safety_error_is_publicly_safe():
     repository = _repository()
     write_service = _write_service()
@@ -522,7 +553,7 @@ def test_memory_add_safety_error_is_publicly_safe():
         ("scope", "global"),
         ("project_id", "other"),
         ("created_at", "2026-09-08T12:00:00Z"),
-        ("provenance", {"created_by": "caller"}),
+        ("provenance", {"api_key": "synthetic-secret-value"}),
         ("embedding", [1.0]),
     ],
 )
@@ -554,6 +585,45 @@ def test_memory_add_rejects_forbidden_extra_arguments_before_write(field, value)
 
     result = response.json()["result"]
     assert result["isError"] is True
-    assert field in result["content"][0]["text"]
+    assert result["content"][0]["text"] == INVALID_TOOL_ARGUMENTS_MESSAGE
+    assert str(value) not in result["content"][0]["text"]
+    write_service.add.assert_not_awaited()
+    assert repository.mock_calls == []
+
+
+def test_memory_add_rejects_invalid_allowed_argument_without_reflecting_sensitive_value():
+    repository = _repository()
+    write_service = _write_service()
+    app = create_http_app(
+        _settings("correct-token"),
+        repository=repository,
+        write_service=write_service,
+    )
+    sensitive_value = "synthetic-sensitive-value"
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json=_memory_add_request(
+                content="Use PostgreSQL for migration tests.",
+                memory_type="decision",
+                tags={"api_key": sensitive_value},
+            ),
+            headers=_mcp_headers(
+                "correct-token",
+                method="tools/call",
+                project_id="project-a",
+                tool_name="memory_add",
+            ),
+        )
+
+    result = response.json()["result"]
+    error_text = result["content"][0]["text"]
+    assert result["isError"] is True
+    assert error_text == INVALID_TOOL_ARGUMENTS_MESSAGE
+    assert sensitive_value not in error_text
+    assert "input_value" not in error_text
+    assert "input_type" not in error_text
+    assert "errors.pydantic.dev" not in error_text
     write_service.add.assert_not_awaited()
     assert repository.mock_calls == []

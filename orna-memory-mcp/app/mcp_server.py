@@ -11,7 +11,7 @@ from uuid import UUID
 
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.tools import Tool
 from mcp_types import ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, ValidationError
@@ -28,6 +28,49 @@ from app.write import MemoryAddCommand, MemoryWriteService
 from app.write_safety import E5LengthGuard, MemorySafetyError, MemoryWriteSafety
 
 MCP_PATH = "/mcp"
+INVALID_TOOL_ARGUMENTS_MESSAGE = "invalid tool arguments"
+
+
+class StrictSafeTool(Tool):
+    """Строгий MCP tool, не отражающий невалидные аргументы в публичной ошибке."""
+
+    async def run(
+        self,
+        arguments: dict[str, Any],
+        context: Context[Any, Any],
+        convert_result: bool = False,
+    ) -> Any:
+        try:
+            return await super().run(arguments, context, convert_result)
+        except ToolError as exc:
+            # В mcp 2.1.1 только argument ValidationError оборачивается напрямую в
+            # ToolError. Ошибки handler оборачиваются через собственный ToolError,
+            # а ошибки public output — через UnexpectedToolError.
+            if isinstance(exc.__cause__, ValidationError) and not isinstance(
+                exc, UnexpectedToolError
+            ):
+                raise ToolError(INVALID_TOOL_ARGUMENTS_MESSAGE) from None
+            raise
+
+
+def _create_strict_safe_tool(
+    handler: Callable[..., Any],
+    *,
+    name: str,
+    annotations: ToolAnnotations,
+) -> Tool:
+    """Создаёт переиспользуемый MCP tool со строгой схемой и безопасной ошибкой."""
+    tool = StrictSafeTool.from_function(
+        handler,
+        name=name,
+        annotations=annotations,
+        structured_output=True,
+    )
+    argument_model = tool.fn_metadata.arg_model
+    argument_model.model_config.update(extra="forbid", hide_input_in_errors=True)
+    argument_model.model_rebuild(force=True)
+    tool.parameters = argument_model.model_json_schema(by_alias=True)
+    return tool
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,20 +159,11 @@ def _create_memory_get_tool() -> Tool:
             raise ToolError("memory not found")
         return MemoryGetResult.model_validate(record)
 
-    tool = Tool.from_function(
+    return _create_strict_safe_tool(
         memory_get,
         name="memory_get",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
-        structured_output=True,
     )
-
-    # mcp 2.1.1 генерирует argument model с extra='ignore'. Tool contract Orna строгий:
-    # неизвестные поля должны отклоняться до вызова handler и repository.
-    argument_model = tool.fn_metadata.arg_model
-    argument_model.model_config["extra"] = "forbid"
-    argument_model.model_rebuild(force=True)
-    tool.parameters = argument_model.model_json_schema(by_alias=True)
-    return tool
 
 
 def _create_memory_add_tool() -> Tool:
@@ -178,7 +212,7 @@ def _create_memory_add_tool() -> Tool:
 
         return MemoryGetResult.model_validate(record)
 
-    tool = Tool.from_function(
+    return _create_strict_safe_tool(
         memory_add,
         name="memory_add",
         annotations=ToolAnnotations(
@@ -187,13 +221,7 @@ def _create_memory_add_tool() -> Tool:
             idempotent_hint=False,
             open_world_hint=False,
         ),
-        structured_output=True,
     )
-    argument_model = tool.fn_metadata.arg_model
-    argument_model.model_config["extra"] = "forbid"
-    argument_model.model_rebuild(force=True)
-    tool.parameters = argument_model.model_json_schema(by_alias=True)
-    return tool
 
 
 def create_mcp_server(
