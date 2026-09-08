@@ -114,10 +114,49 @@ async def test_insert_and_get_hydrate_complete_records(
 
     assert inserted.provenance == {"source": "integration-test"}
     assert inserted.created_at is not None
-    assert await repository.get_by_id(inserted.id) == inserted
-    assert await repository.get_active_by_logical_id(inserted.logical_id) == inserted
-    assert await repository.get_by_id(uuid4()) is None
-    assert await repository.get_active_by_logical_id(uuid4()) is None
+    assert await repository.get_by_id(inserted.id, "project-a") == inserted
+    assert await repository.get_active_by_logical_id(inserted.logical_id, "project-a") == inserted
+    assert await repository.get_by_id(uuid4(), "project-a") is None
+    assert await repository.get_active_by_logical_id(uuid4(), "project-a") is None
+
+
+async def test_get_lookups_filter_project_visibility(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    project_a = await repository.insert(
+        memory_record(
+            content="Project A lookup",
+            embedding=unit_vector(0),
+            scope=MemoryScope.PROJECT,
+            project_id="project-a",
+        )
+    )
+    project_b = await repository.insert(
+        memory_record(
+            content="Project B lookup",
+            embedding=unit_vector(1),
+            scope=MemoryScope.PROJECT,
+            project_id="project-b",
+        )
+    )
+    global_memory = await repository.insert(
+        memory_record(content="Global lookup", embedding=unit_vector(2))
+    )
+
+    assert await repository.get_by_id(project_a.id, "project-a") == project_a
+    assert await repository.get_by_id(project_a.id, "project-b") is None
+    assert await repository.get_by_id(project_b.id, "project-a") is None
+    assert await repository.get_by_id(global_memory.id, "project-a") == global_memory
+
+    assert await repository.get_active_by_logical_id(project_a.logical_id, "project-a") == project_a
+    assert await repository.get_active_by_logical_id(project_a.logical_id, "project-b") is None
+    assert await repository.get_active_by_logical_id(project_b.logical_id, "project-a") is None
+    assert (
+        await repository.get_active_by_logical_id(global_memory.logical_id, "project-a")
+        == global_memory
+    )
 
 
 @pytest.mark.parametrize("strategy", ["exact", "hnsw"])
@@ -281,7 +320,7 @@ async def test_search_lexical_handles_identifiers_hyphens_and_visibility(
     assert all(score > 0 for _record, score in identifier_results)
 
 
-async def test_get_active_by_logical_id_ignores_non_active_record(
+async def test_get_by_id_returns_visible_non_active_record_but_logical_lookup_ignores_it(
     repository_database: tuple[Settings, asyncpg.Pool],
 ) -> None:
     settings, pool = repository_database
@@ -290,9 +329,12 @@ async def test_get_active_by_logical_id_ignores_non_active_record(
         memory_record(
             content="Archived record",
             embedding=unit_vector(6),
+            scope=MemoryScope.PROJECT,
+            project_id="project-a",
             status=MemoryStatus.ARCHIVED,
         )
     )
 
-    assert await repository.get_by_id(archived.id) == archived
-    assert await repository.get_active_by_logical_id(archived.logical_id) is None
+    assert await repository.get_by_id(archived.id, "project-a") == archived
+    assert await repository.get_by_id(archived.id, "project-b") is None
+    assert await repository.get_active_by_logical_id(archived.logical_id, "project-a") is None

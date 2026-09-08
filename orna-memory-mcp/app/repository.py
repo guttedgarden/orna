@@ -75,23 +75,38 @@ class MemoryRepository:
             raise RuntimeError("memory insert returned no row")
         return self._hydrate(row)
 
-    async def get_by_id(self, id: UUID) -> MemoryRecord | None:
-        """Возвращает любую ревизию памяти по физическому UUID."""
+    async def get_by_id(self, id: UUID, project_id: str) -> MemoryRecord | None:
+        """Возвращает видимую ревизию памяти по физическому UUID независимо от status."""
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM memories WHERE id = $1;", id)
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM memories
+                WHERE id = $1
+                  AND (scope = 'global' OR project_id = $2);
+                """,
+                id,
+                project_id,
+            )
         return self._hydrate(row) if row is not None else None
 
-    async def get_active_by_logical_id(self, logical_id: UUID) -> MemoryRecord | None:
-        """Возвращает активную ревизию логической памяти."""
+    async def get_active_by_logical_id(
+        self,
+        logical_id: UUID,
+        project_id: str,
+    ) -> MemoryRecord | None:
+        """Возвращает видимую активную ревизию логической памяти."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT *
                 FROM memories
                 WHERE logical_id = $1
-                  AND status = 'active';
+                  AND status = 'active'
+                  AND (scope = 'global' OR project_id = $2);
                 """,
                 logical_id,
+                project_id,
             )
         return self._hydrate(row) if row is not None else None
 
