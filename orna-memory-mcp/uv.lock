@@ -883,6 +883,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "uuid6" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -902,6 +903,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.5" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
     { name = "uuid6", specifier = "==2025.0.1" },
+    { name = "uvicorn", specifier = "==0.52.4" },
 ]
 
 [package.metadata.requires-dev]
