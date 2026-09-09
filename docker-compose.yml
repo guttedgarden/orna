@@ -42,6 +42,28 @@ services:
     networks:
       - memory-internal
 
+  database-migrate:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command: ["python", "-m", "app.migrate"]
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-orna}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-orna_memory}
+
+    networks:
+      - memory-internal
+
   orna-memory-mcp:
     build:
       context: .
@@ -61,13 +83,10 @@ services:
     restart: unless-stopped
 
     depends_on:
+      database-migrate:
+        condition: service_completed_successfully
       model-cache-init:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-
-    ports:
-      - "127.0.0.1:8000:8000"
 
     environment:
       POSTGRES_HOST: postgres
@@ -88,11 +107,36 @@ services:
     networks:
       - memory-internal
 
+  mcp-loopback:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command: ["python", "-m", "app.tcp_proxy"]
+    restart: unless-stopped
+
+    depends_on:
+      orna-memory-mcp:
+        condition: service_started
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    environment:
+      TCP_PROXY_TARGET_HOST: orna-memory-mcp
+      TCP_PROXY_TARGET_PORT: "8000"
+
+    networks:
+      - mcp-ingress
+      - memory-internal
+
 networks:
   memory-internal:
     driver: bridge
     internal: true
   model-download:
+    driver: bridge
+  mcp-ingress:
     driver: bridge
 
 volumes:
