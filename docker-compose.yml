@@ -41,6 +41,7 @@ services:
 
     networks:
       - memory-internal
+      - postgres-host-access
 
   database-migrate:
     build:
@@ -137,6 +138,10 @@ networks:
   model-download:
     driver: bridge
   mcp-ingress:
+    driver: bridge
+  # Отдельная сеть даёт Docker host gateway для loopback-публикации PostgreSQL,
+  # не подключая СУБД к ingress-сети MCP.
+  postgres-host-access:
     driver: bridge
 
 volumes:
