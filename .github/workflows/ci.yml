@@ -9,6 +9,31 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: orna
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_DB: orna_memory
+      ORNA_MEMORY_TOKEN: ci-only-token
+      EMBEDDING_CACHE_DIR: ${{ runner.temp }}/orna-fastembed
+      ORNA_TEST_E5_CACHE_DIR: ${{ runner.temp }}/orna-fastembed
+      EMBEDDING_LOCAL_FILES_ONLY: "true"
+      HF_HUB_DISABLE_XET: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_USER: orna
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: orna_memory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orna -d orna_memory"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     defaults:
       run:
         working-directory: orna-memory-mcp
@@ -17,16 +42,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.0.0
         with:
           enable-cache: true
-          version: "latest"
+          version: "0.12.2"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
+      - name: Check dependency lock
+        run: uv lock --check
+
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --frozen --all-groups
+
+      - name: Restore pinned E5 cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/orna-fastembed
+          key: ${{ runner.os }}-orna-e5-${{ hashFiles('orna-memory-mcp/app/embedding_profile.py', 'orna-memory-mcp/uv.lock') }}
+
+      - name: Prepare and verify pinned E5 model
+        run: uv run python -m app.model_cache
 
       - name: Check code formatting
         run: uv run ruff format --check .
@@ -34,5 +71,8 @@ jobs:
       - name: Run linter
         run: uv run ruff check .
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Run unit tests with real E5 tokenizer
+        run: uv run pytest tests/unit -v
+
+      - name: Run PostgreSQL integration tests with real E5 retrieval
+        run: uv run pytest tests/integration -v
