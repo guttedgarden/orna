@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from mcp.server.auth.settings import AuthSettings
@@ -180,10 +180,23 @@ def _create_lifespan(
 
 def _create_memory_get_tool() -> Tool:
     async def memory_get(
-        memory_id: UUID,
+        memory_id: Annotated[
+            UUID,
+            Field(
+                description=(
+                    "Physical UUID returned by memory_search or memory_add. Use this tool when "
+                    "the exact revision, status, timestamps, or provenance must be inspected."
+                )
+            ),
+        ],
         ctx: Context[MCPDependencies, Any],
     ) -> MemoryGetResult:
-        """Read one visible memory revision by its physical UUID."""
+        """Read one exact memory revision by physical UUID.
+
+        Use after memory_search or memory_add when the exact revision, lifecycle status,
+        timestamps, or provenance matters. This is not a search tool: pass a returned physical
+        memory id. Visibility remains limited to the current project plus global memories.
+        """
         try:
             project_id = resolve_project_header(ctx.headers)
         except ProjectHeaderError as exc:
@@ -206,19 +219,50 @@ def _create_memory_get_tool() -> Tool:
 
 def _create_memory_add_tool() -> Tool:
     async def memory_add(
-        content: str,
-        memory_type: str,
+        content: Annotated[
+            str,
+            Field(
+                description=(
+                    "A concise, self-contained durable claim. Include the decision or finding "
+                    "and the reason it will matter in future work."
+                )
+            ),
+        ],
+        memory_type: Annotated[
+            str,
+            Field(
+                description=(
+                    "Client-defined category such as decision, incident, constraint, "
+                    "architecture, or convention."
+                )
+            ),
+        ],
         # MCP 2.1.1 берёт default для public schema прямо из сигнатуры функции.
         # Эти списки не изменяются: MemoryAddCommand создаёт собственные копии.
-        tags: list[str] = [],  # noqa: B006
-        identifiers: list[str] = [],  # noqa: B006
+        tags: Annotated[
+            list[str],
+            Field(description="Optional short topic labels that improve later retrieval."),
+        ] = [],  # noqa: B006
+        identifiers: Annotated[
+            list[str],
+            Field(
+                description=(
+                    "Optional exact technical names such as classes, functions, commands, "
+                    "error codes, configuration keys, or file paths."
+                )
+            ),
+        ] = [],  # noqa: B006
         *,
         ctx: Context[MCPDependencies, Any],
     ) -> MemoryGetResult:
-        """Store durable, non-obvious engineering experience for the current project.
+        """Store confirmed, reusable experience for future work in the current project.
 
-        Records are always project-scoped. Credentials are forbidden. Summarize long text
-        into a durable claim before writing.
+        Use after completing or diagnosing work when the result is durable and non-obvious:
+        a decision with rationale, an incident root cause or workaround, an invariant, a
+        constraint, or a project convention. Search first when practical to avoid duplicates.
+        Do not store raw logs, transient task state, speculation, easily rediscoverable code,
+        or credentials. Records are always project-scoped. Summarize long text into one concise,
+        self-contained claim before writing.
         """
         try:
             project_id = resolve_project_header(ctx.headers)
@@ -264,15 +308,35 @@ def _create_memory_add_tool() -> Tool:
 
 def _create_memory_search_tool() -> Tool:
     async def memory_search(
-        query: str,
-        memory_type: str | None = None,
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Natural-language search describing the current task, symptom, error, "
+                    "component, or decision. Include exact identifiers when available."
+                )
+            ),
+        ],
+        memory_type: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional exact client-defined category filter. Omit it when relevant "
+                    "experience may have different categories."
+                )
+            ),
+        ] = None,
         *,
         ctx: Context[MCPDependencies, Any],
     ) -> MemorySearchResponse:
-        """Search durable project experience visible to the current project.
+        """Search prior durable experience before substantial work or troubleshooting.
 
-        Results include applicable global memories, can be limited by memory_type, and
-        contain at most 5 items.
+        Use early when previous decisions, incidents, constraints, conventions, or workarounds
+        may affect the task. Search with the task, symptom, error text, component names, and exact
+        identifiers rather than asking whether any memory exists. Results include applicable
+        global memories, can be limited by memory_type, and contain at most 5 items. Treat results
+        as context to verify against current code and authoritative documentation, not as a
+        replacement for them.
         """
         try:
             project_id = resolve_project_header(ctx.headers)

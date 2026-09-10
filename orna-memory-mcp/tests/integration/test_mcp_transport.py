@@ -239,6 +239,12 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
     assert memory_get["inputSchema"]["additionalProperties"] is False
     assert memory_get["inputSchema"]["required"] == ["memory_id"]
     assert memory_get["inputSchema"]["properties"]["memory_id"]["format"] == "uuid"
+    assert "exact revision" in memory_get["description"]
+    assert "not a search tool" in memory_get["description"]
+    assert (
+        "Physical UUID returned by"
+        in memory_get["inputSchema"]["properties"]["memory_id"]["description"]
+    )
     assert memory_get["annotations"] == {
         "readOnlyHint": True,
         "openWorldHint": False,
@@ -262,9 +268,14 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
         "idempotentHint": False,
         "openWorldHint": False,
     }
-    assert "durable" in memory_add["description"]
+    assert "confirmed, reusable experience" in memory_add["description"]
+    assert "Search first" in memory_add["description"]
+    assert "raw logs" in memory_add["description"]
+    assert "credentials" in memory_add["description"]
     assert "always project-scoped" in memory_add["description"]
-    assert "Credentials are forbidden" in memory_add["description"]
+    assert "durable claim" in memory_add["inputSchema"]["properties"]["content"]["description"]
+    assert "incident" in memory_add["inputSchema"]["properties"]["memory_type"]["description"]
+    assert "error codes" in memory_add["inputSchema"]["properties"]["identifiers"]["description"]
     assert memory_search["inputSchema"]["additionalProperties"] is False
     assert set(memory_search["inputSchema"]["properties"]) == {"query", "memory_type"}
     assert memory_search["inputSchema"]["required"] == ["query"]
@@ -287,10 +298,15 @@ def test_valid_token_reaches_stateless_modern_mcp_handler():
         "lexical_score",
     ):
         assert internal_field not in output_schema
-    assert "durable project experience" in memory_search["description"]
-    assert "applicable global memories" in memory_search["description"]
+    assert "before substantial work" in memory_search["description"]
+    assert "error text" in memory_search["description"]
+    normalized_search_description = " ".join(memory_search["description"].split())
+    assert "applicable global memories" in normalized_search_description
     assert "memory_type" in memory_search["description"]
     assert "at most 5" in memory_search["description"]
+    assert "authoritative documentation" in memory_search["description"]
+    assert "exact identifiers" in memory_search["inputSchema"]["properties"]["query"]["description"]
+    assert "Omit it" in memory_search["inputSchema"]["properties"]["memory_type"]["description"]
     assert "mcp-session-id" not in response.headers
 
 
