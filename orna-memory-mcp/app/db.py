@@ -22,6 +22,16 @@ if TYPE_CHECKING:
 MIGRATION_LOCK_KEY = 814729001
 
 _MIGRATION_FILE_PATTERN = re.compile(r"^(\d{4})_.*\.sql$")
+_INITIAL_MIGRATION_VERSION = "0001_initial.sql"
+_INITIAL_BOOTSTRAP_RELATION_NAMES = (
+    "memories",
+    "uq_memories_active_logical",
+    "uq_memories_supersedes",
+    "idx_memories_lexical_text",
+    "idx_memories_embedding_active",
+    "idx_memories_active_content_hash",
+)
+_INITIAL_BOOTSTRAP_FUNCTION_NAMES = ("prevent_memory_revision_mutation",)
 
 
 class MigrationError(Exception):
@@ -34,6 +44,44 @@ class ChecksumMismatchError(MigrationError):
 
 class DuplicateMigrationError(MigrationError):
     """Обнаружены файлы миграций с совпадающим номером версии."""
+
+
+async def _assert_initial_bootstrap_has_no_owned_object_collisions(
+    conn: asyncpg.Connection,
+) -> None:
+    """Отклоняет legacy bootstrap при неизвестных объектах, принадлежащих 0001."""
+    relation_rows = await conn.fetch(
+        """
+        SELECT c.relname
+        FROM pg_class AS c
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = ANY($1::text[])
+        ORDER BY c.relname;
+        """,
+        _INITIAL_BOOTSTRAP_RELATION_NAMES,
+    )
+    function_rows = await conn.fetch(
+        """
+        SELECT p.proname
+        FROM pg_proc AS p
+        JOIN pg_namespace AS n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname = ANY($1::text[])
+        ORDER BY p.proname;
+        """,
+        _INITIAL_BOOTSTRAP_FUNCTION_NAMES,
+    )
+
+    conflicting_objects = [f"public.{row['relname']}" for row in relation_rows]
+    conflicting_objects.extend(f"function public.{row['proname']}()" for row in function_rows)
+    if conflicting_objects:
+        objects = ", ".join(conflicting_objects)
+        raise MigrationError(
+            f"Initial migration '{_INITIAL_MIGRATION_VERSION}' is pending, but conflicting "
+            f"Orna-owned object(s) already exist: {objects}. Verify or restore migration "
+            "history before retrying; no schema was adopted or modified."
+        )
 
 
 async def init_connection(conn: asyncpg.Connection) -> None:
@@ -114,6 +162,11 @@ async def _execute_migrations(
                     f"Checksum mismatch for migration '{version}': "
                     f"recorded {stored_checksum}, computed {computed_checksum}"
                 )
+
+        if _INITIAL_MIGRATION_VERSION not in applied_migrations and any(
+            file_path.name == _INITIAL_MIGRATION_VERSION for file_path in migration_files
+        ):
+            await _assert_initial_bootstrap_has_no_owned_object_collisions(conn)
 
         # Применяем новые миграции
         applied_versions: list[str] = []

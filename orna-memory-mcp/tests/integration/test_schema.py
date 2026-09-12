@@ -259,6 +259,78 @@ class TestMigrationRunner:
         finally:
             await conn.close()
 
+    async def test_initial_bootstrap_rejects_preexisting_memories_without_history(
+        self, test_database: Settings
+    ):
+        """Bootstrap не принимает таблицу memories без записи 0001 в журнале."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            await conn.execute("CREATE TABLE memories (id UUID PRIMARY KEY);")
+
+            with pytest.raises(MigrationError, match=r"public\.memories"):
+                await run_migrations(conn)
+
+            journal_exists = await conn.fetchval(
+                "SELECT to_regclass('public.schema_migrations') IS NOT NULL;"
+            )
+            assert journal_exists is False
+        finally:
+            await conn.close()
+
+    async def test_initial_bootstrap_rejects_btree_with_owned_hnsw_index_name(
+        self, test_database: Settings
+    ):
+        """Bootstrap не принимает B-tree под именем owned HNSW-индекса."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            assert await run_migrations(conn) == EXPECTED_MIGRATIONS
+            await conn.execute("DELETE FROM schema_migrations;")
+            await conn.execute("DROP INDEX idx_memories_embedding_active;")
+            await conn.execute(
+                "CREATE INDEX idx_memories_embedding_active ON memories (memory_type);"
+            )
+
+            with pytest.raises(MigrationError, match=r"public\.idx_memories_embedding_active"):
+                await run_migrations(conn)
+
+            versions = await conn.fetch("SELECT version FROM schema_migrations ORDER BY version;")
+            assert versions == []
+        finally:
+            await conn.close()
+
+    async def test_initial_bootstrap_rejects_owned_index_name_on_other_table(
+        self, test_database: Settings
+    ):
+        """Bootstrap не принимает owned index name, занятый другой таблицей."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            await conn.execute("CREATE TABLE unrelated_records (memory_type TEXT NOT NULL);")
+            await conn.execute(
+                "CREATE INDEX idx_memories_embedding_active ON unrelated_records (memory_type);"
+            )
+
+            with pytest.raises(MigrationError, match=r"public\.idx_memories_embedding_active"):
+                await run_migrations(conn)
+
+            journal_exists = await conn.fetchval(
+                "SELECT to_regclass('public.schema_migrations') IS NOT NULL;"
+            )
+            assert journal_exists is False
+        finally:
+            await conn.close()
+
+    async def test_initial_bootstrap_allows_preexisting_vector_extension_without_owned_objects(
+        self, test_database: Settings
+    ):
+        """Предварительно установленный vector не мешает чистому bootstrap."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            await conn.execute("CREATE EXTENSION vector;")
+
+            assert await run_migrations(conn) == EXPECTED_MIGRATIONS
+        finally:
+            await conn.close()
+
     async def test_checksum_mismatch_detection(self, test_database: Settings, tmp_path: Path):
         """Обнаружение изменения содержимого уже примененного файла миграции."""
         # Копируем оригинальную миграцию во временный каталог
