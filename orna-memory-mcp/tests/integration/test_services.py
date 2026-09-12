@@ -61,18 +61,16 @@ async def service_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
     base_settings = Settings()
     database_name = f"orna_service_test_{uuid4().hex[:10]}"
     admin_conn = await asyncpg.connect(
-        f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
-        f"@{base_settings.postgres_host}:{base_settings.postgres_port}/template1"
+        host=base_settings.postgres_host,
+        port=base_settings.postgres_port,
+        user=base_settings.postgres_user,
+        password=base_settings.postgres_password,
+        database="template1",
     )
-    await admin_conn.execute(f'CREATE DATABASE "{database_name}";')
-    test_settings = base_settings.model_copy(
-        update={
-            "postgres_db": database_name,
-            "database_url": (
-                f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
-                f"@{base_settings.postgres_host}:{base_settings.postgres_port}/{database_name}"
-            ),
-        }
+    await admin_conn.execute(f'CREATE DATABASE "{database_name}" TEMPLATE template0;')
+    test_settings = Settings(
+        **base_settings.model_dump(exclude={"database_url", "postgres_db"}),
+        postgres_db=database_name,
     )
     await run_database_migrations(test_settings)
     pool = await asyncpg.create_pool(

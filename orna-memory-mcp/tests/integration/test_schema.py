@@ -35,19 +35,17 @@ async def test_database():
     settings = Settings()
     db_name = f"orna_test_{uuid.uuid4().hex[:10]}"
     admin_conn = await asyncpg.connect(
-        f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
-        f"@{settings.postgres_host}:{settings.postgres_port}/template1"
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+        database="template1",
     )
-    await admin_conn.execute(f'CREATE DATABASE "{db_name}";')
+    await admin_conn.execute(f'CREATE DATABASE "{db_name}" TEMPLATE template0;')
 
-    test_settings = settings.model_copy(
-        update={
-            "postgres_db": db_name,
-            "database_url": (
-                f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
-                f"@{settings.postgres_host}:{settings.postgres_port}/{db_name}"
-            ),
-        }
+    test_settings = Settings(
+        **settings.model_dump(exclude={"database_url", "postgres_db"}),
+        postgres_db=db_name,
     )
 
     try:
@@ -59,6 +57,108 @@ async def test_database():
             f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
         )
         await admin_conn.execute(f'DROP DATABASE "{db_name}";')
+        await admin_conn.close()
+
+
+async def _format_identifier_command(
+    conn: asyncpg.Connection,
+    template: str,
+    first_argument: str,
+    second_argument: str,
+) -> str:
+    """Формирует DDL с PostgreSQL-экранированием только для disposable test identifiers."""
+    return await conn.fetchval(
+        "SELECT format($1::text, $2::text, $3::text);",
+        template,
+        first_argument,
+        second_argument,
+    )
+
+
+async def test_settings_url_connects_and_migrates_with_reserved_components() -> None:
+    """Settings DSN работает с ролью, паролем и БД, содержащими URI delimiters."""
+    admin_settings = Settings()
+    suffix = uuid.uuid4().hex[:10]
+    role_name = f"orna#{suffix}?%/@:"
+    password = f"password#{suffix}?%/@:"
+    database_name = f"orna#{suffix}?%/@:"
+    admin_conn = await asyncpg.connect(
+        host=admin_settings.postgres_host,
+        port=admin_settings.postgres_port,
+        user=admin_settings.postgres_user,
+        password=admin_settings.postgres_password,
+        database="template1",
+    )
+    role_created = False
+    database_created = False
+
+    try:
+        create_role = await _format_identifier_command(
+            admin_conn,
+            "CREATE ROLE %I LOGIN PASSWORD %L",
+            role_name,
+            password,
+        )
+        await admin_conn.execute(create_role)
+        role_created = True
+
+        create_database = await _format_identifier_command(
+            admin_conn,
+            "CREATE DATABASE %I OWNER %I TEMPLATE template0",
+            database_name,
+            role_name,
+        )
+        await admin_conn.execute(create_database)
+        database_created = True
+
+        extension_conn = await asyncpg.connect(
+            host=admin_settings.postgres_host,
+            port=admin_settings.postgres_port,
+            user=admin_settings.postgres_user,
+            password=admin_settings.postgres_password,
+            database=database_name,
+        )
+        try:
+            await extension_conn.execute("CREATE EXTENSION vector;")
+        finally:
+            await extension_conn.close()
+
+        reserved_settings = Settings(
+            postgres_host=admin_settings.postgres_host,
+            postgres_port=admin_settings.postgres_port,
+            postgres_user=role_name,
+            postgres_password=password,
+            postgres_db=database_name,
+        )
+        assert await run_database_migrations(reserved_settings) == EXPECTED_MIGRATIONS
+
+        connection = await asyncpg.connect(reserved_settings.database_url)
+        try:
+            assert await connection.fetchval("SELECT current_user;") == role_name
+        finally:
+            await connection.close()
+    finally:
+        if database_created:
+            await admin_conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid();",
+                database_name,
+            )
+            drop_database = await _format_identifier_command(
+                admin_conn,
+                "DROP DATABASE %I",
+                database_name,
+                database_name,
+            )
+            await admin_conn.execute(drop_database)
+        if role_created:
+            drop_role = await _format_identifier_command(
+                admin_conn,
+                "DROP ROLE %I",
+                role_name,
+                role_name,
+            )
+            await admin_conn.execute(drop_role)
         await admin_conn.close()
 
 

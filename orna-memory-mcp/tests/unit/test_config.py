@@ -1,4 +1,5 @@
 import pytest
+from asyncpg.connect_utils import _parse_connect_dsn_and_args
 from pydantic import ValidationError
 
 from app.config import Settings
@@ -94,10 +95,66 @@ class TestDatabaseUrlComputation:
             == "postgresql://custom_user:custom_password@db.internal:5433/custom_db"
         )
 
+    def test_computed_database_url_round_trips_reserved_components(self):
+        """Компоненты URI не должны теряться или менять значение в asyncpg parser."""
+        user = "user#?%/@:"
+        password = "password#?%/@:"
+        database = "database#?%/@:"
+        cfg = Settings(
+            postgres_host="db.internal",
+            postgres_port=5433,
+            postgres_user=user,
+            postgres_password=password,
+            postgres_db=database,
+            _env_file=None,
+        )
+
+        addresses, params = _parse_connect_dsn_and_args(
+            dsn=cfg.database_url,
+            host=None,
+            port=None,
+            user=None,
+            password=None,
+            passfile=None,
+            database=None,
+            ssl=False,
+            service=None,
+            servicefile=None,
+            direct_tls=None,
+            server_settings=None,
+            target_session_attrs=None,
+            krbsrvname=None,
+            gsslib=None,
+        )
+
+        assert addresses == [("db.internal", 5433)]
+        assert params.user == user
+        assert params.password == password
+        assert params.database == database
+
+    def test_computed_database_url_brackets_ipv6_host(self):
+        cfg = Settings(postgres_host="::1", _env_file=None)
+
+        assert cfg.database_url == "postgresql://orna:@[::1]:5432/orna_memory"
+
     def test_explicit_database_url_preserved(self):
         custom_url = "postgresql://override_user:override_pass@remote_host:5439/override_db"
         cfg = Settings(database_url=custom_url, _env_file=None)
         assert cfg.database_url == custom_url
+
+    def test_settings_repr_excludes_connection_secrets(self):
+        cfg = Settings(
+            postgres_password="password#?%/@:",
+            database_url="postgresql://user:password@host:5432/database",
+            orna_memory_token="token-value",
+            _env_file=None,
+        )
+
+        representation = repr(cfg)
+
+        assert "password#?%/@:" not in representation
+        assert "postgresql://user:password@host:5432/database" not in representation
+        assert "token-value" not in representation
 
 
 class TestConnectionPoolValidation:

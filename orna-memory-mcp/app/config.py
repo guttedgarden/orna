@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import quote
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,9 +40,9 @@ class Settings(BaseSettings):
     postgres_host: str = "127.0.0.1"
     postgres_port: int = 5432
     postgres_user: str = "orna"
-    postgres_password: str = ""
+    postgres_password: str = Field(default="", repr=False)
     postgres_db: str = "orna_memory"
-    database_url: str | None = None
+    database_url: str | None = Field(default=None, repr=False)
     database_pool_min_size: int = 2
     database_pool_max_size: int = 10
 
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     # MCP server settings
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8000
-    orna_memory_token: str = ""
+    orna_memory_token: str = Field(default="", repr=False)
 
     @model_validator(mode="after")
     def assemble_database_url_and_validate_pool(self) -> Self:
@@ -78,9 +79,14 @@ class Settings(BaseSettings):
 
         # Вычисляем database_url, если он не был передан явно
         if not self.database_url:
+            host = self.postgres_host
+            if ":" in host and not (host.startswith("[") and host.endswith("]")):
+                host = f"[{host}]"
+            user = quote(self.postgres_user, safe="")
+            password = quote(self.postgres_password, safe="")
+            database = quote(self.postgres_db, safe="")
             self.database_url = (
-                f"postgresql://{self.postgres_user}:{self.postgres_password}"
-                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+                f"postgresql://{user}:{password}@{host}:{self.postgres_port}/{database}"
             )
 
         # Валидация размера connection pool

@@ -23,21 +23,26 @@ async def repository_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
     base_settings = Settings()
     database_name = f"orna_repository_test_{uuid4().hex[:10]}"
     admin_conn = await asyncpg.connect(
-        f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
-        f"@{base_settings.postgres_host}:{base_settings.postgres_port}/template1"
+        host=base_settings.postgres_host,
+        port=base_settings.postgres_port,
+        user=base_settings.postgres_user,
+        password=base_settings.postgres_password,
+        database="template1",
     )
-    await admin_conn.execute(f'CREATE DATABASE "{database_name}";')
+    await admin_conn.execute(f'CREATE DATABASE "{database_name}" TEMPLATE template0;')
 
-    test_settings = base_settings.model_copy(
-        update={
-            "postgres_db": database_name,
-            "database_url": (
-                f"postgresql://{base_settings.postgres_user}:{base_settings.postgres_password}"
-                f"@{base_settings.postgres_host}:{base_settings.postgres_port}/{database_name}"
-            ),
-            "hnsw_ef_search": 73,
-            "hnsw_iterative_scan": "strict_order",
-        }
+    test_settings = Settings(
+        **base_settings.model_dump(
+            exclude={
+                "database_url",
+                "postgres_db",
+                "hnsw_ef_search",
+                "hnsw_iterative_scan",
+            }
+        ),
+        postgres_db=database_name,
+        hnsw_ef_search=73,
+        hnsw_iterative_scan="strict_order",
     )
 
     await run_database_migrations(test_settings)
