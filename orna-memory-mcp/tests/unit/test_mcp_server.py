@@ -40,3 +40,35 @@ def test_http_app_owns_production_database_pool_lifecycle(monkeypatch):
     assert repository._pool is pool
     assert embeddings._service.model_name == config.embedding_model
     assert search_config is config
+
+
+def test_http_app_drains_embedding_executor_before_closing_database_pool(monkeypatch):
+    config = _settings("correct-token")
+    events: list[str] = []
+    pool = AsyncMock()
+
+    async def close_pool():
+        events.append("pool")
+
+    pool.close.side_effect = close_pool
+    monkeypatch.setattr(mcp_server_module, "create_db_pool", AsyncMock(return_value=pool))
+    monkeypatch.setattr(mcp_server_module, "E5LengthGuard", MagicMock())
+
+    executor = MagicMock()
+
+    async def close_executor():
+        events.append("executor")
+
+    executor.aclose = AsyncMock(side_effect=close_executor)
+    monkeypatch.setattr(
+        mcp_server_module,
+        "AsyncEmbeddingExecutor",
+        MagicMock(return_value=executor),
+    )
+
+    app = create_http_app(config)
+    with TestClient(app, base_url="http://127.0.0.1:8000"):
+        pass
+
+    executor.aclose.assert_awaited_once_with()
+    assert events == ["executor", "pool"]

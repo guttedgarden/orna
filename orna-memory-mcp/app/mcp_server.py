@@ -150,6 +150,7 @@ def _create_lifespan(
             return
 
         pool = await create_db_pool(config)
+        embeddings: AsyncEmbeddingExecutor | None = None
         try:
             production_repository = MemoryRepository(pool, config)
             embedding_service = EmbeddingService(config)
@@ -173,6 +174,8 @@ def _create_lifespan(
                 ),
             )
         finally:
+            if embeddings is not None:
+                await embeddings.aclose()
             await pool.close()
 
     return lifespan

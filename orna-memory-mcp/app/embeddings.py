@@ -2,7 +2,7 @@
 
 import asyncio
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from threading import Lock
 from typing import Any, Protocol
 
@@ -158,18 +158,74 @@ class AsyncEmbeddingExecutor:
             raise ValueError("max_concurrency must be >= 1")
         self._service = service
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._inflight: set[asyncio.Task[Any]] = set()
+        self._closing = False
+
+    async def _submit(self, function: Callable[..., Any], *args: Any) -> Any:
+        if self._closing:
+            raise RuntimeError("embedding executor is closed")
+        await self._semaphore.acquire()
+        if self._closing:
+            self._semaphore.release()
+            raise RuntimeError("embedding executor is closed")
+        try:
+            worker = asyncio.create_task(asyncio.to_thread(function, *args))
+        except BaseException:
+            self._semaphore.release()
+            raise
+
+        self._inflight.add(worker)
+        worker.add_done_callback(self._finish_worker)
+        return await self._await_worker(worker)
+
+    async def _await_worker(self, worker: asyncio.Task[Any]) -> Any:
+        """Ожидает worker через shield, не оставляя exception после отмены caller."""
+        waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+        def deliver_result(completed: asyncio.Task[Any]) -> None:
+            if waiter.cancelled():
+                if not completed.cancelled():
+                    completed.exception()
+                return
+            if completed.cancelled():
+                waiter.cancel()
+                return
+
+            exception = completed.exception()
+            if exception is not None:
+                waiter.set_exception(exception)
+            else:
+                waiter.set_result(completed.result())
+
+        worker.add_done_callback(deliver_result)
+        try:
+            return await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            waiter.cancel()
+            raise
+
+    def _finish_worker(self, worker: asyncio.Task[Any]) -> None:
+        self._inflight.discard(worker)
+        self._semaphore.release()
+        if not worker.cancelled():
+            # Отменившийся caller больше не ожидает task, но его exception нельзя оставлять
+            # необработанным.
+            worker.exception()
+
+    async def aclose(self) -> None:
+        """Прекращает приём work и дожидается уже запущенного inference."""
+        self._closing = True
+        if self._inflight:
+            await asyncio.gather(*self._inflight, return_exceptions=True)
 
     async def embed_query(self, query: str) -> list[float]:
-        async with self._semaphore:
-            return await asyncio.to_thread(self._service.embed_query, query)
+        return await self._submit(self._service.embed_query, query)
 
     async def embed_memory(self, content: str) -> list[float]:
-        async with self._semaphore:
-            return await asyncio.to_thread(self._service.embed_memory, content)
+        return await self._submit(self._service.embed_memory, content)
 
     async def embed_memories(self, contents: Sequence[str]) -> list[list[float]]:
-        async with self._semaphore:
-            return await asyncio.to_thread(self._service.embed_memories, contents)
+        return await self._submit(self._service.embed_memories, contents)
 
 
 embedding_service = EmbeddingService()

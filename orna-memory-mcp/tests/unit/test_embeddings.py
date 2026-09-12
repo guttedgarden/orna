@@ -1,6 +1,7 @@
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock, get_ident
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -199,26 +200,262 @@ class TestEmbeddingService:
 
 
 class TestAsyncEmbeddingExecutor:
-    async def test_bounds_concurrent_inference(self, monkeypatch):
-        service = MagicMock()
-        service.embed_query.side_effect = lambda query: [float(len(query))]
-        executor = AsyncEmbeddingExecutor(service, max_concurrency=2)
+    async def test_cancelled_caller_keeps_slot_until_running_thread_finishes(self):
+        first_started = Event()
+        second_started = Event()
+        release_first = Event()
         active = 0
         maximum_active = 0
+        counter_lock = Lock()
 
-        async def fake_to_thread(function, *args):
+        def embed_query(query: str) -> list[float]:
             nonlocal active, maximum_active
-            active += 1
-            maximum_active = max(maximum_active, active)
-            await asyncio.sleep(0.01)
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
             try:
-                return function(*args)
+                if query == "first":
+                    first_started.set()
+                    assert release_first.wait(timeout=1)
+                else:
+                    second_started.set()
+                return [float(len(query))]
             finally:
-                active -= 1
+                with counter_lock:
+                    active -= 1
 
-        monkeypatch.setattr("app.embeddings.asyncio.to_thread", fake_to_thread)
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
 
-        results = await asyncio.gather(*(executor.embed_query(str(index)) for index in range(6)))
+        first_caller = asyncio.create_task(executor.embed_query("first"))
+        assert await asyncio.to_thread(first_started.wait, 1)
+        first_caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_caller
+
+        second_caller = asyncio.create_task(executor.embed_query("second"))
+        assert not await asyncio.to_thread(second_started.wait, 0.05)
+
+        release_first.set()
+        assert await second_caller == [6.0]
+        assert maximum_active == 1
+
+    async def test_aclose_drains_owned_work_and_rejects_new_submissions(self):
+        started = Event()
+        release = Event()
+
+        def embed_query(_query: str) -> list[float]:
+            started.set()
+            assert release.wait(timeout=1)
+            return [1.0]
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+
+        running = asyncio.create_task(executor.embed_query("running"))
+        assert await asyncio.to_thread(started.wait, 1)
+
+        closing = asyncio.create_task(executor.aclose())
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="closed"):
+            await executor.embed_query("rejected")
+        assert not closing.done()
+
+        release.set()
+        assert await running == [1.0]
+        await closing
+
+        with pytest.raises(RuntimeError, match="closed"):
+            await executor.embed_query("still-rejected")
+
+    async def test_repeated_cancellations_do_not_leak_or_double_release_slots(self):
+        starts = {query: Event() for query in ("first", "second", "third", "fourth")}
+        releases = {query: Event() for query in starts}
+        active = 0
+        maximum_active = 0
+        counter_lock = Lock()
+
+        def embed_query(query: str) -> list[float]:
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                starts[query].set()
+                assert releases[query].wait(timeout=1)
+                return [float(len(query))]
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+
+        first = asyncio.create_task(executor.embed_query("first"))
+        assert await asyncio.to_thread(starts["first"].wait, 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        releases["first"].set()
+
+        second = asyncio.create_task(executor.embed_query("second"))
+        assert await asyncio.to_thread(starts["second"].wait, 1)
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        releases["second"].set()
+
+        third = asyncio.create_task(executor.embed_query("third"))
+        fourth = asyncio.create_task(executor.embed_query("fourth"))
+        assert await asyncio.to_thread(starts["third"].wait, 1)
+        assert not await asyncio.to_thread(starts["fourth"].wait, 0.05)
+        releases["third"].set()
+        assert await third == [5.0]
+
+        assert await asyncio.to_thread(starts["fourth"].wait, 1)
+        releases["fourth"].set()
+        assert await fourth == [6.0]
+        assert maximum_active == 1
+
+    async def test_abandoned_backend_exception_is_extracted_and_releases_slot(self):
+        started = Event()
+        release = Event()
+        failed = Event()
+        loop_errors: list[dict[str, object]] = []
+
+        class BackendFailure(RuntimeError):
+            pass
+
+        def embed_query(query: str) -> list[float]:
+            if query == "failing":
+                started.set()
+                assert release.wait(timeout=1)
+                failed.set()
+                raise BackendFailure("backend failed")
+            return [1.0]
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            caller = asyncio.create_task(executor.embed_query("failing"))
+            assert await asyncio.to_thread(started.wait, 1)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+
+            release.set()
+            assert await asyncio.to_thread(failed.wait, 1)
+            assert await executor.embed_query("recovery") == [1.0]
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+
+        assert loop_errors == []
+
+    async def test_running_thread_does_not_block_event_loop_heartbeat(self):
+        started = Event()
+        release = Event()
+        heartbeat = asyncio.Event()
+
+        def embed_query(_query: str) -> list[float]:
+            started.set()
+            assert release.wait(timeout=1)
+            return [1.0]
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+
+        running = asyncio.create_task(executor.embed_query("blocked"))
+        assert await asyncio.to_thread(started.wait, 1)
+
+        async def beat() -> None:
+            await asyncio.sleep(0)
+            heartbeat.set()
+
+        beat_task = asyncio.create_task(beat())
+        await asyncio.wait_for(heartbeat.wait(), timeout=0.2)
+        await beat_task
+
+        release.set()
+        assert await running == [1.0]
+
+    async def test_all_embedding_operations_share_threaded_submit_path(self):
+        caller_thread = get_ident()
+
+        class SynchronousService:
+            def embed_query(self, _query: str) -> list[int]:
+                return [get_ident()]
+
+            def embed_memory(self, _content: str) -> list[int]:
+                return [get_ident()]
+
+            def embed_memories(self, _contents: list[str]) -> list[list[int]]:
+                return [[get_ident()]]
+
+        executor = AsyncEmbeddingExecutor(SynchronousService(), max_concurrency=1)
+
+        assert (await executor.embed_query("query"))[0] != caller_thread
+        assert (await executor.embed_memory("memory"))[0] != caller_thread
+        assert (await executor.embed_memories(["one"]))[0][0] != caller_thread
+
+    async def test_direct_backend_error_reaches_caller_and_does_not_lose_slot(self):
+        class BackendFailure(RuntimeError):
+            pass
+
+        calls = 0
+
+        def embed_query(_query: str) -> list[float]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise BackendFailure("backend failed")
+            return [1.0]
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+
+        with pytest.raises(BackendFailure, match="backend failed"):
+            await executor.embed_query("fails")
+        assert await executor.embed_query("recovers") == [1.0]
+
+    async def test_bounds_concurrent_inference(self):
+        active = 0
+        maximum_active = 0
+        two_started = Event()
+        release = Event()
+        counter_lock = Lock()
+
+        def embed_query(query: str) -> list[float]:
+            nonlocal active, maximum_active
+            with counter_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                if active == 2:
+                    two_started.set()
+            try:
+                assert release.wait(timeout=1)
+                return [float(len(query))]
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=2)
+
+        callers = [asyncio.create_task(executor.embed_query(str(index))) for index in range(6)]
+        assert await asyncio.to_thread(two_started.wait, 1)
+        release.set()
+        results = await asyncio.gather(*callers)
 
         assert maximum_active == 2
         assert results == [[1.0]] * 6

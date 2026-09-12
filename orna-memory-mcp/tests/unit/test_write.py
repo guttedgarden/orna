@@ -1,9 +1,12 @@
+import asyncio
+from threading import Event
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.embeddings import AsyncEmbeddingExecutor
 from app.models import EMBEDDING_DIMENSION, MemoryScope, MemoryStatus
 from app.normalizer import build_lexical_source, canonical_content_hash
 from app.write import MemoryAddCommand, MemoryWriteService, ProjectContextError
@@ -132,6 +135,39 @@ async def test_safety_rejection_happens_before_embedding_and_repository():
 
     assert rejected_content not in str(error.value)
     embeddings.embed_memory.assert_not_awaited()
+    repository.insert.assert_not_awaited()
+
+
+async def test_cancelled_add_does_not_insert_after_owned_embedding_finishes():
+    started = Event()
+    release = Event()
+
+    def embed_memory(_content: str) -> list[float]:
+        started.set()
+        assert release.wait(timeout=1)
+        return embedding()
+
+    backend = MagicMock()
+    backend.embed_memory.side_effect = embed_memory
+    embeddings = AsyncEmbeddingExecutor(backend, max_concurrency=1)
+    repository = MagicMock()
+    repository.insert = AsyncMock()
+    writer = MemoryWriteService(
+        repository,
+        embeddings,
+        Settings(_env_file=None),
+        allow_safety(),
+    )
+
+    add = asyncio.create_task(writer.add(command(), project_id="project-a"))
+    assert await asyncio.to_thread(started.wait, 1)
+    add.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await add
+
+    repository.insert.assert_not_awaited()
+    release.set()
+    await embeddings.aclose()
     repository.insert.assert_not_awaited()
 
 
