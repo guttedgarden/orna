@@ -113,7 +113,7 @@ async def test_search_normalizes_query_and_runs_retrieval_channels_concurrently(
         memory_type="decision",
     )
     repository.search_lexical.assert_awaited_once_with(
-        "responseproviderexecutor response provider executor",
+        [("responseproviderexecutor", "response provider executor")],
         "project-a",
         17,
         memory_type="decision",

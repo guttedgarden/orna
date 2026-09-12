@@ -10,8 +10,33 @@ from pgvector import Vector
 
 from app.config import Settings
 from app.models import MemoryInsertRecord, MemoryRecord
+from app.normalizer import LexicalQueryGroup
 
 DenseSearchStrategy = Literal["exact", "hnsw"]
+
+
+def _build_lexical_query_expression(
+    lexical_query_groups: list[LexicalQueryGroup],
+) -> tuple[str, list[str]]:
+    """Собирает fixed SQL expression и bound values для групп альтернатив."""
+    expressions: list[str] = []
+    parameters: list[str] = []
+
+    for raw, expanded in lexical_query_groups:
+        raw_placeholder = len(parameters) + 2
+        raw_expression = f"plainto_tsquery('simple', ${raw_placeholder})"
+        parameters.append(raw)
+
+        if raw == expanded:
+            expressions.append(raw_expression)
+            continue
+
+        expanded_placeholder = len(parameters) + 2
+        expanded_expression = f"plainto_tsquery('simple', ${expanded_placeholder})"
+        parameters.append(expanded)
+        expressions.append(f"({raw_expression} || {expanded_expression})")
+
+    return " && ".join(expressions), parameters
 
 
 class MemoryRepository:
@@ -164,19 +189,26 @@ class MemoryRepository:
 
     async def search_lexical(
         self,
-        plain_query_tokens: str,
+        lexical_query_groups: list[LexicalQueryGroup],
         project_id: str | None,
         limit: int,
         *,
         memory_type: str | None = None,
     ) -> list[tuple[MemoryRecord, float]]:
         """Ищет активные memories через syntax-safe PostgreSQL FTS query."""
+        if not lexical_query_groups:
+            return []
+
+        query_expression, query_parameters = _build_lexical_query_expression(lexical_query_groups)
+        limit_placeholder = len(query_parameters) + 2
+        memory_type_placeholder = limit_placeholder + 1
+
         # Отдельное соединение позволяет запускать канал параллельно с dense retrieval.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 WITH query AS (
-                    SELECT plainto_tsquery('simple', $2) AS q
+                    SELECT {query_expression} AS q
                 )
                 SELECT
                     m.*,
@@ -186,12 +218,13 @@ class MemoryRepository:
                 WHERE m.lexical_text @@ query.q
                   AND m.status = 'active'
                   AND (m.scope = 'global' OR m.project_id = $1)
-                  AND ($4::text IS NULL OR m.memory_type = $4)
+                  AND (${memory_type_placeholder}::text IS NULL
+                       OR m.memory_type = ${memory_type_placeholder})
                 ORDER BY lexical_score DESC, m.id ASC
-                LIMIT $3;
+                LIMIT ${limit_placeholder};
                 """,
                 project_id,
-                plain_query_tokens,
+                *query_parameters,
                 limit,
                 memory_type,
             )

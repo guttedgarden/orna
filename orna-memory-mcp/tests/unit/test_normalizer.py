@@ -4,7 +4,7 @@ import pytest
 
 from app.normalizer import (
     build_lexical_source,
-    normalize_query_to_plain_tokens,
+    normalize_query_to_lexical_groups,
     split_identifier,
 )
 
@@ -81,37 +81,87 @@ def test_build_lexical_source_is_deterministic_and_expands_identifiers() -> None
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
-        ("foo-bar", "foo bar"),
-        ("x-request-id", "x request id"),
-        ("foo & bar", "foo bar"),
-        ('"quotes"', "quotes"),
-        ("foo | !bar", "foo bar"),
-        ("(foo)", "foo"),
-        ("ResponseProviderExecutor", "responseproviderexecutor response provider executor"),
+        ("foo-bar", [("foo-bar", "foo bar")]),
+        ("x-request-id", [("x-request-id", "x request id")]),
+        ("foo & bar", [("foo", "foo"), ("bar", "bar")]),
+        ('"quotes"', [("quotes", "quotes")]),
+        ("foo | !bar", [("foo", "foo"), ("bar", "bar")]),
+        ("(foo)", [("foo", "foo")]),
         (
             "src/core/Application.php",
-            "src core application php",
+            [("src/core/application.php", "src core application php")],
         ),
         (
-            "Как устроен ResponseProviderExecutor?",
-            "как устроен responseproviderexecutor response provider executor",
+            "ResponseProviderExecutor timeout",
+            [
+                ("responseproviderexecutor", "response provider executor"),
+                ("timeout", "timeout"),
+            ],
         ),
-        ("English и русский текст", "english и русский текст"),
-        ("emoji🔎Identifier", "emoji identifier"),
-        ("", ""),
-        ("&&&", ""),
-        ("   ", ""),
+        ("getHTTPResponse", [("gethttpresponse", "get http response")]),
+        ("routing_pool", [("routing_pool", "routing pool")]),
+        (
+            "X-Memory-Project",
+            [("x-memory-project", "x memory project")],
+        ),
+        (
+            "Application.php",
+            [("application.php", "application php")],
+        ),
+        (
+            "foo.bar",
+            [("foo.bar", "foo bar")],
+        ),
+        (
+            "namespace/ClassName",
+            [("namespace/classname", "namespace class name")],
+        ),
+        (
+            "550e8400-e29b-41d4-a716-446655440000 checksum",
+            [
+                ("550e8400-e29b-41d4-a716-446655440000", "550e8400 e29b 41d4 a716 446655440000"),
+                ("checksum", "checksum"),
+            ],
+        ),
+        ("МодульПамяти", [("модульпамяти", "модуль памяти")]),
+        (
+            "Как устроен ResponseProviderExecutor?",
+            [
+                ("как", "как"),
+                ("устроен", "устроен"),
+                ("responseproviderexecutor", "response provider executor"),
+            ],
+        ),
+        (
+            "English и русский текст",
+            [
+                ("english", "english"),
+                ("и", "и"),
+                ("русский", "русский"),
+                ("текст", "текст"),
+            ],
+        ),
+        (
+            "emoji🔎Identifier",
+            [("emoji", "emoji"), ("identifier", "identifier")],
+        ),
+        (
+            "ResponseProviderExecutor ResponseProviderExecutor",
+            [("responseproviderexecutor", "response provider executor")],
+        ),
+        ("", []),
+        ("&&&", []),
+        ("   ", []),
     ],
 )
-def test_normalize_query_to_plain_tokens(query: str, expected: str) -> None:
-    result = normalize_query_to_plain_tokens(query)
+def test_normalize_query_to_lexical_groups(query: str, expected: list[tuple[str, str]]) -> None:
+    result = normalize_query_to_lexical_groups(query)
 
     assert result == expected
-    assert normalize_query_to_plain_tokens(result) == result
 
 
 def test_normalize_query_normalizes_unicode_to_nfc() -> None:
     nfc = "CaféParser"
     nfd = unicodedata.normalize("NFD", nfc)
 
-    assert normalize_query_to_plain_tokens(nfd) == normalize_query_to_plain_tokens(nfc)
+    assert normalize_query_to_lexical_groups(nfd) == normalize_query_to_lexical_groups(nfc)

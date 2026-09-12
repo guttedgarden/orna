@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.config import Settings
 from app.embeddings import AsyncEmbeddingBackend
 from app.models import MemoryRecord, MemorySearchResult
-from app.normalizer import normalize_query_to_plain_tokens
+from app.normalizer import normalize_query_to_lexical_groups
 from app.repository import MemoryRepository
 
 
@@ -145,7 +145,7 @@ class MemorySearchService:
         search_query: MemorySearchQuery,
         project_id: str | None,
     ) -> list[MemorySearchResult]:
-        plain_query_tokens = normalize_query_to_plain_tokens(search_query.query)
+        lexical_query_groups = normalize_query_to_lexical_groups(search_query.query)
         query_embedding = await self._embeddings.embed_query(search_query.query)
         candidate_limit = max(
             self._settings.retrieval_candidate_pool_size,
@@ -161,7 +161,7 @@ class MemorySearchService:
                 memory_type=search_query.memory_type,
             ),
             self._repository.search_lexical(
-                plain_query_tokens,
+                lexical_query_groups,
                 project_id,
                 candidate_limit,
                 memory_type=search_query.memory_type,

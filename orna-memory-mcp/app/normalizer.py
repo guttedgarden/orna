@@ -4,6 +4,8 @@ import hashlib
 import unicodedata
 from itertools import pairwise
 
+LexicalQueryGroup = tuple[str, str]
+
 
 def _normalize_unicode(value: str) -> str:
     return unicodedata.normalize("NFC", value)
@@ -48,6 +50,28 @@ def _split_on_separators(value: str) -> list[str]:
             current = []
 
     if current:
+        segments.append("".join(current))
+
+    return segments
+
+
+def _split_query_segments(value: str) -> list[str]:
+    """Сохраняет connector punctuation в raw варианте technical identifier."""
+    segments: list[str] = []
+    current: list[str] = []
+    has_word_character = False
+
+    for character in value:
+        if _is_word_character(character) or character in "-_.\\/":
+            current.append(character)
+            has_word_character = has_word_character or _is_word_character(character)
+        else:
+            if has_word_character:
+                segments.append("".join(current))
+            current = []
+            has_word_character = False
+
+    if has_word_character:
         segments.append("".join(current))
 
     return segments
@@ -108,15 +132,22 @@ def build_lexical_source(content: str, tags: list[str], identifiers: list[str]) 
     return " ".join(part for part in parts if part)
 
 
-def normalize_query_to_plain_tokens(query: str) -> str:
-    """Разворачивает query identifiers в plain words для ``plainto_tsquery``."""
+def normalize_query_to_lexical_groups(query: str) -> list[LexicalQueryGroup]:
+    """Возвращает raw/expanded alternatives для independent lexical concepts."""
     normalized = _normalize_unicode(query)
-    result: list[str] = []
-    seen: set[str] = set()
+    result: list[LexicalQueryGroup] = []
+    seen: set[LexicalQueryGroup] = set()
 
-    for segment in _split_on_separators(normalized):
-        _append_unique(result, seen, segment.lower())
-        for component in _split_camel_case(segment):
-            _append_unique(result, seen, component.lower())
+    for segment in _split_query_segments(normalized):
+        raw = segment.lower()
+        expanded = " ".join(
+            component.lower()
+            for word_segment in _split_on_separators(segment)
+            for component in _split_camel_case(word_segment)
+        )
+        group = (raw, expanded)
+        if group not in seen:
+            seen.add(group)
+            result.append(group)
 
-    return " ".join(result)
+    return result

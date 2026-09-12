@@ -12,7 +12,7 @@ from app.models import EMBEDDING_DIMENSION, MemoryInsertRecord, MemoryScope, Mem
 from app.normalizer import (
     build_lexical_source,
     canonical_content_hash,
-    normalize_query_to_plain_tokens,
+    normalize_query_to_lexical_groups,
 )
 from app.repository import MemoryRepository
 
@@ -81,6 +81,7 @@ def memory_record(
     record_id: UUID | None = None,
     scope: MemoryScope = MemoryScope.GLOBAL,
     project_id: str | None = None,
+    memory_type: str = "fact",
     status: MemoryStatus = MemoryStatus.ACTIVE,
     identifiers: list[str] | None = None,
 ) -> MemoryInsertRecord:
@@ -93,7 +94,7 @@ def memory_record(
         supersedes_id=None,
         scope=scope,
         project_id=project_id,
-        memory_type="fact",
+        memory_type=memory_type,
         status=status,
         content=content,
         content_hash=canonical_content_hash(content),
@@ -306,23 +307,146 @@ async def test_search_lexical_handles_identifiers_hyphens_and_visibility(
     )
 
     identifier_results = await repository.search_lexical(
-        normalize_query_to_plain_tokens("ResponseProviderExecutor"),
+        normalize_query_to_lexical_groups("ResponseProviderExecutor"),
         "project-a",
         10,
     )
     split_identifier_results = await repository.search_lexical(
-        normalize_query_to_plain_tokens("response provider executor"),
+        normalize_query_to_lexical_groups("response provider executor"),
         "project-a",
         10,
     )
-    foo_bar_results = await repository.search_lexical("foo-bar", "project-a", 10)
-    request_id_results = await repository.search_lexical("x-request-id", "project-a", 10)
+    foo_bar_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("foo-bar"), "project-a", 10
+    )
+    request_id_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("x-request-id"), "project-a", 10
+    )
 
     assert [record.id for record, _score in identifier_results] == [executor.id]
     assert [record.id for record, _score in split_identifier_results] == [executor.id]
     assert [record.id for record, _score in foo_bar_results] == [hyphenated.id]
     assert [record.id for record, _score in request_id_results] == [hyphenated.id]
     assert all(score > 0 for _record, score in identifier_results)
+
+
+async def test_search_lexical_compound_groups_keep_alternatives_and_and_semantics(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    raw_compound = await repository.insert(
+        memory_record(
+            content="ResponseProviderExecutor timeout",
+            embedding=unit_vector(6),
+        )
+    )
+    expanded_compound = await repository.insert(
+        memory_record(
+            content="response provider executor timeout",
+            embedding=unit_vector(7),
+        )
+    )
+    without_timeout = await repository.insert(
+        memory_record(
+            content="ResponseProviderExecutor",
+            embedding=unit_vector(8),
+        )
+    )
+    explicitly_identified = await repository.insert(
+        memory_record(
+            content="Executor metadata is available.",
+            embedding=unit_vector(9),
+            identifiers=["ResponseProviderExecutor"],
+        )
+    )
+
+    compound_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("ResponseProviderExecutor timeout"),
+        "project-a",
+        10,
+    )
+    raw_identifier_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("ResponseProviderExecutor"),
+        "project-a",
+        10,
+    )
+    split_identifier_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("response provider executor"),
+        "project-a",
+        10,
+    )
+
+    compound_result_ids = {record.id for record, _score in compound_results}
+    assert {raw_compound.id, expanded_compound.id} <= compound_result_ids
+    assert without_timeout.id not in compound_result_ids
+    assert explicitly_identified.id in {record.id for record, _score in raw_identifier_results}
+    assert explicitly_identified.id in {record.id for record, _score in split_identifier_results}
+    assert all(score > 0 for _record, score in compound_results)
+
+
+async def test_search_lexical_normalizes_technical_inputs_and_filters_before_limit(
+    repository_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = repository_database
+    repository = MemoryRepository(pool, settings)
+    visible = await repository.insert(
+        memory_record(
+            content="ResponseProviderExecutor timeout",
+            embedding=unit_vector(10),
+            record_id=UUID(int=10),
+            scope=MemoryScope.PROJECT,
+            project_id="project-a",
+            memory_type="decision",
+        )
+    )
+    for record_id, scope, project_id, memory_type, status in (
+        (UUID(int=1), MemoryScope.PROJECT, "project-b", "decision", MemoryStatus.ACTIVE),
+        (UUID(int=2), MemoryScope.PROJECT, "project-a", "decision", MemoryStatus.ARCHIVED),
+        (UUID(int=3), MemoryScope.PROJECT, "project-a", "fact", MemoryStatus.ACTIVE),
+    ):
+        await repository.insert(
+            memory_record(
+                content="ResponseProviderExecutor timeout",
+                embedding=unit_vector(11),
+                record_id=record_id,
+                scope=scope,
+                project_id=project_id,
+                memory_type=memory_type,
+                status=status,
+            )
+        )
+
+    filtered_results = await repository.search_lexical(
+        normalize_query_to_lexical_groups("ResponseProviderExecutor timeout"),
+        "project-a",
+        1,
+        memory_type="decision",
+    )
+
+    assert [record.id for record, _score in filtered_results] == [visible.id]
+
+    for index, query in enumerate(
+        (
+            "getHTTPResponse",
+            "routing_pool",
+            "X-Memory-Project",
+            "Application.php",
+            "foo.bar",
+            "namespace/ClassName",
+            "550e8400-e29b-41d4-a716-446655440000 checksum",
+            "МодульПамяти",
+        ),
+        start=12,
+    ):
+        stored = await repository.insert(memory_record(content=query, embedding=unit_vector(index)))
+        results = await repository.search_lexical(
+            normalize_query_to_lexical_groups(query), "project-a", 20
+        )
+
+        assert stored.id in {record.id for record, _score in results}
+
+    assert await repository.search_lexical([], "project-a", 10) == []
 
 
 async def test_get_by_id_returns_visible_non_active_record_but_logical_lookup_ignores_it(
