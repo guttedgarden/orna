@@ -71,14 +71,14 @@ class TestDatabaseUrlComputation:
         monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
         monkeypatch.delenv("DATABASE_URL", raising=False)
 
-        cfg = Settings(_env_file=None)
+        cfg = Settings(database_url=None, _env_file=None)
         assert cfg.database_url == "postgresql://orna:@127.0.0.1:5432/orna_memory"
 
     def test_computed_database_url_with_password(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("POSTGRES_PASSWORD", "secret_pass")
         monkeypatch.delenv("DATABASE_URL", raising=False)
 
-        cfg = Settings(_env_file=None)
+        cfg = Settings(database_url=None, _env_file=None)
         assert cfg.database_url == "postgresql://orna:secret_pass@127.0.0.1:5432/orna_memory"
 
     def test_computed_database_url_with_custom_params(self):
@@ -88,6 +88,7 @@ class TestDatabaseUrlComputation:
             postgres_user="custom_user",
             postgres_password="custom_password",
             postgres_db="custom_db",
+            database_url=None,
             _env_file=None,
         )
         assert (
@@ -106,6 +107,7 @@ class TestDatabaseUrlComputation:
             postgres_user=user,
             postgres_password=password,
             postgres_db=database,
+            database_url=None,
             _env_file=None,
         )
 
@@ -135,13 +137,28 @@ class TestDatabaseUrlComputation:
     def test_computed_database_url_brackets_ipv6_host(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("POSTGRES_PASSWORD", "review-disposable-only")
 
-        cfg = Settings(postgres_host="::1", postgres_password="", _env_file=None)
+        cfg = Settings(
+            postgres_host="::1",
+            postgres_password="",
+            database_url=None,
+            _env_file=None,
+        )
 
         assert cfg.database_url == "postgresql://orna:@[::1]:5432/orna_memory"
 
     def test_explicit_database_url_preserved(self):
         custom_url = "postgresql://override_user:override_pass@remote_host:5439/override_db"
         cfg = Settings(database_url=custom_url, _env_file=None)
+        assert cfg.database_url == custom_url
+
+    def test_process_database_url_preserved_when_not_explicitly_overridden(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        custom_url = "postgresql://environment-user:environment-password@environment-host:5432/environment-db"
+        monkeypatch.setenv("DATABASE_URL", custom_url)
+
+        cfg = Settings(_env_file=None)
+
         assert cfg.database_url == custom_url
 
     def test_settings_repr_excludes_connection_secrets(self):

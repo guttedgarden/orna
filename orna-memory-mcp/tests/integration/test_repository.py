@@ -43,6 +43,7 @@ async def repository_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
         postgres_db=database_name,
         hnsw_ef_search=73,
         hnsw_iterative_scan="strict_order",
+        database_url=None,
     )
 
     await run_database_migrations(test_settings)

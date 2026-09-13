@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import shutil
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import asyncpg
@@ -27,10 +28,18 @@ from app.db import (
 DUMMY_HASH_32 = hashlib.sha256(b"dummy_content").digest()
 DUMMY_VECTOR = [1.0] + [0.0] * 1023
 EXPECTED_MIGRATIONS = ["0001_initial.sql", "0002_reject_zero_embeddings.sql"]
+CONFLICTING_DATABASE_URL = "postgresql://conflict-user:conflict-password@127.0.0.1:1/conflict_db"
 
 
 @pytest.fixture
-async def test_database():
+def conflicting_process_database_url(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Задаёт безопасный process override до создания disposable Settings."""
+    monkeypatch.setenv("DATABASE_URL", CONFLICTING_DATABASE_URL)
+    return CONFLICTING_DATABASE_URL
+
+
+@pytest.fixture
+async def test_database(conflicting_process_database_url: str):
     """Создает изолированную временную БД для теста и удаляет её после выполнения."""
     settings = Settings()
     db_name = f"orna_test_{uuid.uuid4().hex[:10]}"
@@ -46,6 +55,7 @@ async def test_database():
     test_settings = Settings(
         **settings.model_dump(exclude={"database_url", "postgres_db"}),
         postgres_db=db_name,
+        database_url=None,
     )
 
     try:
@@ -129,6 +139,7 @@ async def test_settings_url_connects_and_migrates_with_reserved_components() -> 
             postgres_user=role_name,
             postgres_password=password,
             postgres_db=database_name,
+            database_url=None,
         )
         assert await run_database_migrations(reserved_settings) == EXPECTED_MIGRATIONS
 
@@ -160,6 +171,38 @@ async def test_settings_url_connects_and_migrates_with_reserved_components() -> 
             )
             await admin_conn.execute(drop_role)
         await admin_conn.close()
+
+
+@pytest.fixture
+async def migrated_test_database_ignoring_process_database_url(
+    test_database: Settings,
+    conflicting_process_database_url: str,
+) -> AsyncIterator[Settings]:
+    """Мигрирует и проверяет disposable DB при конфликтующем process override."""
+    assert test_database.database_url != conflicting_process_database_url
+    assert await run_database_migrations(test_database) == EXPECTED_MIGRATIONS
+
+    connection = await asyncpg.connect(test_database.database_url)
+    try:
+        assert await connection.fetchval("SELECT current_database();") == test_database.postgres_db
+        migration_rows = await connection.fetch(
+            "SELECT version FROM schema_migrations ORDER BY version;"
+        )
+        assert [row["version"] for row in migration_rows] == EXPECTED_MIGRATIONS
+    finally:
+        await connection.close()
+
+    yield test_database
+
+
+async def test_test_owned_settings_ignore_conflicting_process_database_url(
+    migrated_test_database_ignoring_process_database_url: Settings,
+) -> None:
+    """Fixture не использует process DATABASE_URL для disposable migrations."""
+    assert (
+        migrated_test_database_ignoring_process_database_url.database_url
+        != CONFLICTING_DATABASE_URL
+    )
 
 
 @pytest.fixture

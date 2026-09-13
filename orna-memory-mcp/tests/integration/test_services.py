@@ -71,6 +71,7 @@ async def service_database() -> AsyncIterator[tuple[Settings, asyncpg.Pool]]:
     test_settings = Settings(
         **base_settings.model_dump(exclude={"database_url", "postgres_db"}),
         postgres_db=database_name,
+        database_url=None,
     )
     await run_database_migrations(test_settings)
     pool = await asyncpg.create_pool(
