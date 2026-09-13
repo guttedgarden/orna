@@ -270,6 +270,73 @@ class TestAsyncEmbeddingExecutor:
         with pytest.raises(RuntimeError, match="closed"):
             await executor.embed_query("still-rejected")
 
+    async def test_cancelled_aclose_keeps_worker_owned_until_thread_finishes(self):
+        first_started = Event()
+        second_started = Event()
+        release_first = Event()
+        first_finished = Event()
+
+        def embed_query(query: str) -> list[float]:
+            if query == "first":
+                first_started.set()
+                try:
+                    assert release_first.wait(timeout=1)
+                finally:
+                    first_finished.set()
+            else:
+                second_started.set()
+            return [float(len(query))]
+
+        service = MagicMock()
+        service.embed_query.side_effect = embed_query
+        executor = AsyncEmbeddingExecutor(service, max_concurrency=1)
+        first = asyncio.create_task(executor.embed_query("first"))
+        second: asyncio.Task[list[float]] | None = None
+        closing: asyncio.Task[None] | None = None
+
+        try:
+            assert await asyncio.to_thread(first_started.wait, 1)
+            second = asyncio.create_task(executor.embed_query("second"))
+            await asyncio.sleep(0)
+
+            closing = asyncio.create_task(executor.aclose())
+            await asyncio.sleep(0)
+            closing.cancel("first shutdown cancellation")
+            await asyncio.sleep(0)
+
+            assert not closing.done()
+            assert not first_finished.is_set()
+            assert len(executor._inflight) == 1
+            assert executor._semaphore.locked()
+            assert not await asyncio.to_thread(second_started.wait, 0.05)
+
+            closing.cancel("second shutdown cancellation")
+            await asyncio.sleep(0)
+            assert not closing.done()
+
+            with pytest.raises(RuntimeError, match="closed"):
+                await executor.embed_query("late")
+
+            release_first.set()
+            assert await first == [5.0]
+            with pytest.raises(RuntimeError, match="closed"):
+                await second
+            with pytest.raises(asyncio.CancelledError) as cancellation:
+                await closing
+
+            assert cancellation.value.args == ("first shutdown cancellation",)
+            assert first_finished.is_set()
+            assert executor._inflight == set()
+            assert executor._semaphore._value == 1
+        finally:
+            release_first.set()
+            cleanup = [first]
+            if second is not None:
+                cleanup.append(second)
+            if closing is not None:
+                cleanup.append(closing)
+            await asyncio.gather(*cleanup, return_exceptions=True)
+
     async def test_repeated_cancellations_do_not_leak_or_double_release_slots(self):
         starts = {query: Event() for query in ("first", "second", "third", "fourth")}
         releases = {query: Event() for query in starts}

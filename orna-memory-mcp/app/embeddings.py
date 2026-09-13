@@ -215,8 +215,21 @@ class AsyncEmbeddingExecutor:
     async def aclose(self) -> None:
         """Прекращает приём work и дожидается уже запущенного inference."""
         self._closing = True
-        if self._inflight:
-            await asyncio.gather(*self._inflight, return_exceptions=True)
+        if not self._inflight:
+            return
+
+        drain = asyncio.gather(*self._inflight, return_exceptions=True)
+        cancellation: asyncio.CancelledError | None = None
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+
+        drain.result()
+        if cancellation is not None:
+            raise cancellation
 
     async def embed_query(self, query: str) -> list[float]:
         return await self._submit(self._service.embed_query, query)

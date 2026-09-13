@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -174,9 +175,35 @@ def _create_lifespan(
                 ),
             )
         finally:
-            if embeddings is not None:
-                await embeddings.aclose()
-            await pool.close()
+            shutdown_error: BaseException | None = None
+            try:
+                if embeddings is not None:
+                    await embeddings.aclose()
+            except BaseException as error:
+                shutdown_error = error
+
+            pool_close = asyncio.create_task(pool.close())
+            while not pool_close.done():
+                try:
+                    await asyncio.shield(pool_close)
+                except asyncio.CancelledError as error:
+                    if shutdown_error is None:
+                        shutdown_error = error
+                except BaseException:
+                    break
+
+            pool_error: BaseException | None = None
+            try:
+                pool_close.result()
+            except BaseException as error:
+                pool_error = error
+
+            if shutdown_error is not None:
+                if pool_error is not None:
+                    raise shutdown_error from pool_error
+                raise shutdown_error
+            if pool_error is not None:
+                raise pool_error
 
     return lifespan
 
