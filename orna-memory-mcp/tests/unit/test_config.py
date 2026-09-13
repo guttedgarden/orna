@@ -132,8 +132,10 @@ class TestDatabaseUrlComputation:
         assert params.password == password
         assert params.database == database
 
-    def test_computed_database_url_brackets_ipv6_host(self):
-        cfg = Settings(postgres_host="::1", _env_file=None)
+    def test_computed_database_url_brackets_ipv6_host(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("POSTGRES_PASSWORD", "review-disposable-only")
+
+        cfg = Settings(postgres_host="::1", postgres_password="", _env_file=None)
 
         assert cfg.database_url == "postgresql://orna:@[::1]:5432/orna_memory"
 
