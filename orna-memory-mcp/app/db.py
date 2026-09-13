@@ -63,18 +63,20 @@ async def _assert_initial_bootstrap_has_no_owned_object_collisions(
     )
     function_rows = await conn.fetch(
         """
-        SELECT p.proname
+        SELECT n.nspname || '.' || p.proname || '('
+               || pg_get_function_identity_arguments(p.oid) || ')' AS identity
         FROM pg_proc AS p
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public'
           AND p.proname = ANY($1::text[])
-        ORDER BY p.proname;
+          AND pg_get_function_identity_arguments(p.oid) = ''
+        ORDER BY p.proname, p.oid;
         """,
         _INITIAL_BOOTSTRAP_FUNCTION_NAMES,
     )
 
     conflicting_objects = [f"public.{row['relname']}" for row in relation_rows]
-    conflicting_objects.extend(f"function public.{row['proname']}()" for row in function_rows)
+    conflicting_objects.extend(f"function {row['identity']}" for row in function_rows)
     if conflicting_objects:
         objects = ", ".join(conflicting_objects)
         raise MigrationError(

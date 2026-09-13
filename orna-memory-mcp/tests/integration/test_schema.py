@@ -277,6 +277,72 @@ class TestMigrationRunner:
         finally:
             await conn.close()
 
+    async def test_initial_bootstrap_allows_unrelated_function_overload(
+        self, test_database: Settings
+    ):
+        """Bootstrap отличает owned zero-argument функцию от стороннего overload."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            await conn.execute(
+                """
+                CREATE FUNCTION public.prevent_memory_revision_mutation(integer)
+                RETURNS integer
+                LANGUAGE sql
+                IMMUTABLE
+                AS $$ SELECT $1 $$;
+                """
+            )
+
+            assert await run_migrations(conn) == EXPECTED_MIGRATIONS
+
+            function_identity = await conn.fetchval(
+                """
+                SELECT n.nspname || '.' || p.proname || '('
+                       || pg_get_function_identity_arguments(p.oid) || ')'
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname = 'prevent_memory_revision_mutation'
+                  AND pg_get_function_identity_arguments(p.oid) = 'integer';
+                """
+            )
+            assert function_identity == "public.prevent_memory_revision_mutation(integer)"
+        finally:
+            await conn.close()
+
+    async def test_initial_bootstrap_rejects_owned_zero_argument_function_without_history(
+        self, test_database: Settings
+    ):
+        """Bootstrap не принимает exact owned функцию без history и не делает частичный DDL."""
+        conn = await asyncpg.connect(test_database.database_url)
+        try:
+            await conn.execute(
+                """
+                CREATE FUNCTION public.prevent_memory_revision_mutation()
+                RETURNS integer
+                LANGUAGE sql
+                IMMUTABLE
+                AS $$ SELECT 1 $$;
+                """
+            )
+
+            with pytest.raises(
+                MigrationError,
+                match=r"function public\.prevent_memory_revision_mutation\(\)",
+            ):
+                await run_migrations(conn)
+
+            journal_exists = await conn.fetchval(
+                "SELECT to_regclass('public.schema_migrations') IS NOT NULL;"
+            )
+            memories_exists = await conn.fetchval(
+                "SELECT to_regclass('public.memories') IS NOT NULL;"
+            )
+            assert journal_exists is False
+            assert memories_exists is False
+        finally:
+            await conn.close()
+
     async def test_initial_bootstrap_rejects_btree_with_owned_hnsw_index_name(
         self, test_database: Settings
     ):
