@@ -1,0 +1,54 @@
+[project]
+name = "orna-memory-mcp"
+version = "0.1.0"
+description = "Self-hosted context & memory MCP backend for AI agents"
+readme = "../README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg==0.31.0",
+    "fastembed==0.8.0",
+    "huggingface-hub==1.30.0",
+    "mcp==2.1.1",
+    "pgvector==0.5.0",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "uuid6==2025.0.1",
+    "uvicorn==0.52.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "RUF001", # ambiguous-unicode-character-string (Cyrillic letters)
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+pythonpath = ["."]
