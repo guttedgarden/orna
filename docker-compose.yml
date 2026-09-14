@@ -1,4 +1,22 @@
 services:
+  model-cache-init:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command: ["python", "-m", "app.model_cache"]
+    restart: "on-failure:5"
+
+    environment:
+      EMBEDDING_CACHE_DIR: /var/cache/orna/fastembed
+      HF_HUB_DISABLE_XET: "1"
+
+    volumes:
+      - fastembed-cache:/var/cache/orna/fastembed
+
+    networks:
+      - model-download
+
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
     restart: unless-stopped
@@ -8,7 +26,7 @@ services:
 
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orna}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-orna_memory}
 
     volumes:
@@ -23,7 +41,109 @@ services:
 
     networks:
       - memory-internal
+      - postgres-host-access
+
+  database-migrate:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command: ["python", "-m", "app.migrate"]
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-orna}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-orna_memory}
+
+    networks:
+      - memory-internal
+
+  orna-memory-mcp:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+    restart: unless-stopped
+
+    depends_on:
+      database-migrate:
+        condition: service_completed_successfully
+      model-cache-init:
+        condition: service_completed_successfully
+
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-orna}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-orna_memory}
+      ORNA_MEMORY_TOKEN: ${ORNA_MEMORY_TOKEN:?set ORNA_MEMORY_TOKEN in .env}
+      EMBEDDING_CACHE_DIR: /var/cache/orna/fastembed
+      EMBEDDING_LOCAL_FILES_ONLY: "true"
+      EMBEDDING_THREADS: "2"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_OFFLINE: "1"
+
+    volumes:
+      - fastembed-cache:/var/cache/orna/fastembed:ro
+
+    networks:
+      - memory-internal
+
+  mcp-loopback:
+    build:
+      context: .
+      dockerfile: orna-memory-mcp/Dockerfile
+    image: orna-memory-mcp:local
+    command: ["python", "-m", "app.tcp_proxy"]
+    restart: unless-stopped
+
+    depends_on:
+      orna-memory-mcp:
+        condition: service_started
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    environment:
+      TCP_PROXY_TARGET_HOST: orna-memory-mcp
+      TCP_PROXY_TARGET_PORT: "8000"
+
+    networks:
+      - mcp-ingress
+      - memory-internal
 
 networks:
   memory-internal:
     driver: bridge
+    internal: true
+  model-download:
+    driver: bridge
+  mcp-ingress:
+    driver: bridge
+  # Отдельная сеть даёт Docker host gateway для loopback-публикации PostgreSQL,
+  # не подключая СУБД к ingress-сети MCP.
+  postgres-host-access:
+    driver: bridge
+
+volumes:
+  # Восстанавливаемый model cache: init пишет, MCP runtime читает.
+  fastembed-cache:

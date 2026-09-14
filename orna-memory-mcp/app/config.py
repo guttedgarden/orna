@@ -1,0 +1,101 @@
+from pathlib import Path
+from typing import Literal, Self
+from urllib.parse import quote
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.embedding_profile import ACTIVE_EMBEDDING_PROFILE
+
+# Детерминированное определение расположения файлов .env относительно структуры репозитория
+_APP_DIR = Path(__file__).resolve().parent
+_SERVICE_DIR = _APP_DIR.parent
+_REPO_DIR = _SERVICE_DIR.parent
+
+_ENV_FILES: list[Path] = []
+if (_REPO_DIR / ".env").is_file():
+    _ENV_FILES.append(_REPO_DIR / ".env")
+if (_SERVICE_DIR / ".env").is_file():
+    _ENV_FILES.append(_SERVICE_DIR / ".env")
+
+
+class Settings(BaseSettings):
+    """Application settings for orna-memory-mcp service."""
+
+    model_config = SettingsConfigDict(
+        env_file=tuple(_ENV_FILES) if _ENV_FILES else ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Embedding settings
+    embedding_model: str = ACTIVE_EMBEDDING_PROFILE.model_name
+    embedding_threads: int = Field(default=2, ge=1)
+    embedding_max_concurrency: int = Field(default=1, ge=1)
+    embedding_cache_dir: Path = _REPO_DIR / "data" / "fastembed"
+    embedding_local_files_only: bool = True
+
+    # Database settings (PostgreSQL 16 + pgvector)
+    # Параметры подключения к PostgreSQL и настройки connection pool
+    postgres_host: str = "127.0.0.1"
+    postgres_port: int = 5432
+    postgres_user: str = "orna"
+    postgres_password: str = Field(default="", repr=False)
+    postgres_db: str = "orna_memory"
+    database_url: str | None = Field(default=None, repr=False)
+    database_pool_min_size: int = 2
+    database_pool_max_size: int = 10
+
+    # Search & retrieval settings
+    # Параметры плотного (dense) и гибридного (RRF) поиска
+    dense_retrieval_strategy: Literal["exact", "hnsw"] = "exact"
+    retrieval_candidate_pool_size: int = Field(default=20, ge=1)
+    rrf_k: int = Field(default=60, ge=1)
+    hnsw_ef_search: int = Field(default=40, ge=1)
+    hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "relaxed_order"
+
+    # Profile versions
+    # Версии профилей векторизации и лексического анализа
+    embedding_profile_version: str = ACTIVE_EMBEDDING_PROFILE.version
+    lexical_profile_version: str = "lexical-v1"
+
+    # MCP server settings
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8000
+    orna_memory_token: str = Field(default="", repr=False)
+
+    @model_validator(mode="after")
+    def assemble_database_url_and_validate_pool(self) -> Self:
+        if self.embedding_model != ACTIVE_EMBEDDING_PROFILE.model_name:
+            raise ValueError(
+                "embedding_model must match the active embedding profile: "
+                f"{ACTIVE_EMBEDDING_PROFILE.model_name}"
+            )
+        if self.embedding_profile_version != ACTIVE_EMBEDDING_PROFILE.version:
+            raise ValueError(
+                "embedding_profile_version must match the active embedding profile: "
+                f"{ACTIVE_EMBEDDING_PROFILE.version}"
+            )
+
+        # Вычисляем database_url, если он не был передан явно
+        if not self.database_url:
+            host = self.postgres_host
+            if ":" in host and not (host.startswith("[") and host.endswith("]")):
+                host = f"[{host}]"
+            user = quote(self.postgres_user, safe="")
+            password = quote(self.postgres_password, safe="")
+            database = quote(self.postgres_db, safe="")
+            self.database_url = (
+                f"postgresql://{user}:{password}@{host}:{self.postgres_port}/{database}"
+            )
+
+        # Валидация размера connection pool
+        if self.database_pool_max_size < 2:
+            raise ValueError("database_pool_max_size must be >= 2")
+        if self.database_pool_max_size < self.database_pool_min_size:
+            raise ValueError("database_pool_max_size must be >= database_pool_min_size")
+
+        return self
+
+
+settings = Settings()
