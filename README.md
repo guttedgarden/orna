@@ -57,20 +57,65 @@ Orna предоставляет три MCP-инструмента:
 
 ### Как выполняется поиск
 
-`memory_search` одновременно использует два канала:
+`memory_search` принимает natural-language `query` и опциональный exact-фильтр
+`memory_type`. MCP фиксирует итоговый `limit=5`; клиент не управляет внутренними
+retrieval limits и ranking parameters.
 
-- семантический поиск по E5 embeddings через `pgvector`;
-- лексический поиск PostgreSQL FTS для точного совпадения терминов и identifiers.
+Поиск проходит в четыре этапа:
 
-Для dense-канала запрос преобразуется в E5 embedding. Для lexical-канала строка
-нормализуется в plain tokens, включая разбиение `camelCase`, `PascalCase` и
-`snake_case` identifiers. Оба SQL-запроса выполняются параллельно через разные
-соединения из connection pool.
+1. **Подготовка запроса.** Для dense-канала сервис вычисляет 1024-мерный E5
+   embedding с префиксом `query:`. Для lexical-канала запрос NFC-нормализуется и
+   разбивается на независимые semantic groups.
+2. **Параллельный retrieval.** Dense и lexical SQL-запросы одновременно получают
+   отдельные соединения из connection pool и выбирают до 20 кандидатов каждый.
+3. **Объединение.** Два упорядоченных списка сливаются через Reciprocal Rank Fusion
+   с `k=60`.
+4. **Публичная проекция.** Первые пять memories возвращаются через MCP без
+   embeddings, distance, channel ranks и RRF score.
 
-Repository отбирает только active memories текущего проекта и записи с global
-scope. Опциональный `memory_type` применяется до ограничения количества
-кандидатов. Результаты объединяются через deterministic RRF и обрезаются до top-5.
-Внутренние distance, rank и RRF score через MCP не возвращаются.
+Dense-канал сравнивает embedding запроса с сохранёнными vectors по cosine distance
+через `pgvector`. Repository поддерживает exact и HNSW retrieval; выбранная
+стратегия не меняет публичный MCP contract.
+
+Lexical-канал использует PostgreSQL FTS с конфигурацией `simple`. Индексируемый
+`lexical_text` строится из `content`, tags и identifiers. Technical identifiers
+сохраняются и в исходной, и в раскрытой форме: `ResponseProviderExecutor` также
+индексируется как `response provider executor`, `routing_pool` — как
+`routing pool`, а `Application.php` — как `application php`.
+
+Для каждой semantic group raw и expanded формы являются альтернативами через OR,
+а независимые группы обязательны одновременно через AND. Концептуально запрос
+`ResponseProviderExecutor timeout` превращается в:
+
+```text
+(responseproviderexecutor OR response provider executor) AND timeout
+```
+
+Фактическое SQL expression собирается из фиксированных
+`plainto_tsquery('simple', ...)`, а все пользовательские значения передаются как
+bound parameters. Поэтому punctuation в запросе не интерпретируется как `tsquery`
+syntax. Если после нормализации lexical groups не осталось, lexical-канал возвращает
+пустой список, но dense-канал продолжает работать.
+
+Оба канала до `LIMIT` отбирают только memories со `status = 'active'`, видимые
+текущему проекту: записи его `project_id` и записи со `scope = 'global'`.
+Опциональный `memory_type` также применяется до выбора кандидатов.
+
+Для каждого кандидата итоговый score равен сумме вкладов каналов, в которых он
+встретился:
+
+```text
+RRF score = Σ 1 / (60 + rank_in_channel)
+```
+
+Например, memory с dense rank 3 и lexical rank 1 получает
+`1 / 63 + 1 / 61`. Совпадение в обоих каналах обычно поднимает результат выше
+кандидата, найденного только одним каналом. При равном score порядок стабилизируют
+лучший channel rank, затем `logical_id` и физический `id`.
+
+Search выполняет retrieval и ранжирование, но не устанавливает истинность или
+актуальность найденного утверждения. Клиент должен сверять результат с текущим
+code, schema, tests и authoritative documentation.
 
 ### Как выполняется запись
 
