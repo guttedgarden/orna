@@ -132,6 +132,15 @@ class RetrievalDataset(_DatasetModel):
     holdout: tuple[QueryRecord, ...]
 
 
+class RetrievalSplit(_DatasetModel):
+    """Corpus и labels только одного явно выбранного split."""
+
+    manifest: DatasetManifest
+    corpus: tuple[CorpusRecord, ...]
+    name: Literal["dev", "holdout"]
+    queries: tuple[QueryRecord, ...]
+
+
 def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -359,3 +368,41 @@ def load_retrieval_dataset(root: Path) -> RetrievalDataset:
     _validate_queries(dataset.dev, dataset.holdout, corpus_by_key)
     _validate_split_summaries(manifest, dataset.dev, dataset.holdout)
     return dataset
+
+
+def load_retrieval_split(
+    root: Path,
+    split: Literal["dev", "holdout"] = "dev",
+) -> RetrievalSplit:
+    """Загружает только выбранные labels, не открывая файл другого split."""
+
+    try:
+        manifest = DatasetManifest.model_validate(_read_json(root / "dataset-manifest.json"))
+    except ValidationError as exc:
+        raise DatasetValidationError(f"invalid dataset manifest: {exc}") from exc
+    _validate_manifest_shape(manifest)
+
+    query_file = f"memory_{split}.jsonl"
+    corpus_payload = _read_jsonl(root / "corpus.jsonl")
+    query_payload = _read_jsonl(root / query_file)
+    _verify_file(root / "corpus.jsonl", manifest.files["corpus.jsonl"], len(corpus_payload))
+    _verify_file(root / query_file, manifest.files[query_file], len(query_payload))
+
+    try:
+        selected = RetrievalSplit(
+            manifest=manifest,
+            corpus=tuple(CorpusRecord.model_validate(record) for record in corpus_payload),
+            name=split,
+            queries=tuple(QueryRecord.model_validate(record) for record in query_payload),
+        )
+    except ValidationError as exc:
+        raise DatasetValidationError(f"invalid dataset record: {exc}") from exc
+
+    corpus_by_key = _validate_corpus(selected.corpus, manifest)
+    if split == "dev":
+        _validate_queries(selected.queries, (), corpus_by_key)
+    else:
+        _validate_queries((), selected.queries, corpus_by_key)
+    if manifest.splits[split].model_dump() != _computed_split_record(selected.queries):
+        raise DatasetValidationError(f"split summary mismatch for {split}")
+    return selected

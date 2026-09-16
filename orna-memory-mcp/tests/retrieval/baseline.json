@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "seed": 0,
+  "cutoff": 5,
+  "dense_strategy": "exact",
+  "candidate_pool_size": 20,
+  "rrf_k": 60,
+  "fts_config": "simple",
+  "embedding_profile": "e5-v1",
+  "warmup": 0,
+  "repeats": 1
+}
