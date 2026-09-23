@@ -138,3 +138,118 @@ async def test_runner_uses_migrated_ephemeral_database_and_is_reproducible() -> 
     finally:
         await admin.close()
     assert still_exists is False
+
+
+async def test_all_eval_modes_enforce_lifecycle_visibility_and_exact_type() -> None:
+    dataset = load_retrieval_dataset(RETRIEVAL_ROOT)
+    selected_keys = {
+        "storage-qdrant-old",
+        "storage-postgres-current",
+        "postgres-loopback",
+        "similar-memory-suggestion",
+        "automatic-supersede-forbidden",
+        "project-context-header",
+        "visibility-project-a",
+        "visibility-project-b",
+        "response-provider-executor",
+        "type-filter-incident",
+    }
+    corpus = tuple(record for record in dataset.corpus if record.memory_key in selected_keys)
+
+    def query(
+        case_id: str,
+        text: str,
+        project_id: str,
+        memory_type: str | None,
+        relevant: str | None,
+        forbidden: list[str],
+    ) -> QueryRecord:
+        return QueryRecord(
+            case_id=case_id,
+            split_group=case_id,
+            query=text,
+            project_id=project_id,
+            memory_type=memory_type,
+            query_language="en",
+            target_language="en",
+            slices=["lifecycle"],
+            relevance={} if relevant is None else {relevant: 2},
+            forbidden=forbidden,
+        )
+
+    queries = (
+        query(
+            "revision",
+            "Qdrant",
+            "eval-a",
+            "decision",
+            "storage-postgres-current",
+            ["storage-qdrant-old"],
+        ),
+        query(
+            "archived",
+            "memory_supersede",
+            "eval-a",
+            None,
+            "automatic-supersede-forbidden",
+            ["similar-memory-suggestion"],
+        ),
+        query(
+            "project-a",
+            "X-Memory-Project",
+            "eval-a",
+            "convention",
+            "visibility-project-a",
+            ["visibility-project-b"],
+        ),
+        query(
+            "project-b",
+            "X-Memory-Project",
+            "eval-b",
+            "convention",
+            "visibility-project-b",
+            ["visibility-project-a"],
+        ),
+        query(
+            "exact-type",
+            "PostgreSQL",
+            "eval-a",
+            "decision",
+            "storage-postgres-current",
+            ["postgres-loopback"],
+        ),
+        query(
+            "foreign-only",
+            "ResponseProviderExecutor",
+            "eval-b",
+            "incident",
+            None,
+            ["response-provider-executor", "type-filter-incident"],
+        ),
+    )
+    config = load_evaluation_config(RETRIEVAL_ROOT / "baseline.json")
+    settings = Settings()
+    async with ephemeral_eval_database(settings) as database:
+        embeddings = DeterministicEvalEmbeddings()
+        await load_eval_corpus(database.pool, corpus, embeddings, database.settings)
+        runner = EvaluationRunner(
+            corpus=corpus,
+            config=config,
+            repository=MemoryRepository(database.pool, database.settings),
+            embeddings=embeddings,
+            settings=database.settings,
+        )
+        execution = await runner.run(queries, modes=("dense", "lexical", "hybrid"))
+
+    for mode in execution.modes:
+        rankings = {case.case_id: case.ranking for case in mode.queries}
+        assert "storage-postgres-current" in rankings["revision"], mode.mode
+        assert "storage-postgres-current" in rankings["exact-type"], mode.mode
+        assert "project-context-header" in rankings["project-a"], mode.mode
+        assert "project-context-header" in rankings["project-b"], mode.mode
+        assert "visibility-project-a" in rankings["project-a"], mode.mode
+        assert "visibility-project-b" in rankings["project-b"], mode.mode
+        assert "similar-memory-suggestion" not in rankings["archived"], mode.mode
+        if mode.mode != "dense":
+            assert "automatic-supersede-forbidden" in rankings["archived"], mode.mode
+        assert rankings["foreign-only"] == (), mode.mode

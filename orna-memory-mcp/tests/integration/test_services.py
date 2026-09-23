@@ -215,3 +215,137 @@ async def test_multilingual_query_finds_english_memory_with_real_pinned_e5(
     stored_result = results[0]
     assert stored_result.rank_dense == 1
     assert stored_result.rank_lexical is None
+
+
+async def test_final_hybrid_ranks_technical_identifiers_and_paths(
+    service_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = service_database
+    repository = MemoryRepository(pool, settings)
+    embeddings = DeterministicEmbeddings()
+    writer = MemoryWriteService(repository, embeddings, settings, AllowAllSafety())
+    searcher = MemorySearchService(repository, embeddings, settings)
+
+    cases = (
+        ("ResponseProviderExecutor", "ResponseProviderExecutor"),
+        ("XMLHTTPParser", "XMLHTTPParser"),
+        ("HTTP2Client", "HTTP2Client"),
+        ("PostgreSQL16", "PostgreSQL16"),
+        ("response_provider_executor", "response_provider_executor"),
+        ("x-request-id", "x-request-id"),
+        ("/srv/orna/app/search.py", "/srv/orna/app/search.py"),
+        (r"C:\Orna\app\search.py", r"C:\Orna\app\search.py"),
+    )
+    stored = {}
+    for identifier, _query in cases:
+        stored[identifier] = await writer.add(
+            MemoryAddCommand(
+                content=f"Technical route {identifier} is available.",
+                scope=MemoryScope.PROJECT,
+                memory_type="incident",
+                identifiers=[identifier],
+            ),
+            project_id="project-a",
+        )
+
+    queries = (
+        *cases,
+        ("ResponseProviderExecutor", "response provider executor"),
+    )
+    for identifier, query in queries:
+        results = await searcher.search(MemorySearchQuery(query=query), project_id="project-a")
+        matched = next((result for result in results if result.id == stored[identifier].id), None)
+        assert matched is not None, query
+        assert matched.rank_lexical is not None, query
+        if query == "ResponseProviderExecutor":
+            assert results[0].id == stored[identifier].id
+
+
+async def test_opposite_claims_remain_distinct_active_memories(
+    service_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = service_database
+    repository = MemoryRepository(pool, settings)
+    embeddings = DeterministicEmbeddings()
+    writer = MemoryWriteService(repository, embeddings, settings, AllowAllSafety())
+    searcher = MemorySearchService(repository, embeddings, settings)
+    claims = []
+    for content in (
+        "FeatureGateX must be enabled for provider requests.",
+        "FeatureGateX must be disabled for provider requests.",
+    ):
+        claims.append(
+            await writer.add(
+                MemoryAddCommand(
+                    content=content,
+                    scope=MemoryScope.PROJECT,
+                    memory_type="decision",
+                    identifiers=["FeatureGateX"],
+                ),
+                project_id="project-a",
+            )
+        )
+
+    results = await searcher.search(
+        MemorySearchQuery(query="FeatureGateX", memory_type="decision"),
+        project_id="project-a",
+    )
+    assert claims[0].id != claims[1].id
+    assert claims[0].logical_id != claims[1].logical_id
+    assert {result.id for result in results} == {claim.id for claim in claims}
+    assert all(result.status.value == "active" for result in results)
+
+
+async def test_real_e5_final_hybrid_finds_identifiers_and_paths(
+    service_database: tuple[Settings, asyncpg.Pool],
+) -> None:
+    settings, pool = service_database
+    settings = settings.model_copy(
+        update={
+            "embedding_cache_dir": _required_real_e5_cache_dir(),
+            "embedding_local_files_only": True,
+        }
+    )
+    repository = MemoryRepository(pool, settings)
+    embeddings = AsyncEmbeddingExecutor(
+        EmbeddingService(settings),
+        max_concurrency=settings.embedding_max_concurrency,
+    )
+    try:
+        writer = MemoryWriteService(
+            repository,
+            embeddings,
+            settings,
+            MemoryWriteSafety(E5LengthGuard(settings)),
+        )
+        searcher = MemorySearchService(repository, embeddings, settings)
+        identifiers = (
+            "ResponseProviderExecutor",
+            "XMLHTTPParser",
+            "HTTP2Client",
+            "PostgreSQL16",
+            "response_provider_executor",
+            "x-request-id",
+            "/srv/orna/app/search.py",
+            r"C:\Orna\app\search.py",
+        )
+        stored = {}
+        for identifier in identifiers:
+            stored[identifier] = await writer.add(
+                MemoryAddCommand(
+                    content=f"Technical route {identifier} is available.",
+                    scope=MemoryScope.PROJECT,
+                    memory_type="incident",
+                    identifiers=[identifier],
+                ),
+                project_id="project-a",
+            )
+
+        for identifier, query in (
+            *((identifier, identifier) for identifier in identifiers),
+            ("ResponseProviderExecutor", "response provider executor"),
+        ):
+            results = await searcher.search(MemorySearchQuery(query=query), project_id="project-a")
+            assert results[0].id == stored[identifier].id, query
+    finally:
+        await embeddings.aclose()
