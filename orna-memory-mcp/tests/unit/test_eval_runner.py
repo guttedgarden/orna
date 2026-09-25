@@ -25,6 +25,7 @@ from tests.evals.runner import (
     apply_evaluation_config,
     build_argument_parser,
     load_evaluation_config,
+    load_run_config,
     normalize_modes,
     safe_failure_message,
 )
@@ -179,6 +180,27 @@ def test_cli_defaults_to_dev_and_rejects_unknown_modes() -> None:
     assert normalize_modes("hybrid,dense,lexical") == ("dense", "lexical", "hybrid")
     with pytest.raises(ValueError, match="unsupported"):
         normalize_modes("dense,unknown")
+
+
+def test_final_run_repeats_rankings_without_changing_baseline_retrieval_config() -> None:
+    args = build_argument_parser().parse_args(
+        [
+            "--config",
+            str(RETRIEVAL_ROOT / "baseline.json"),
+            "--output",
+            "artifact",
+            "--repeats",
+            "3",
+        ]
+    )
+    baseline = load_evaluation_config(args.config)
+    final = load_run_config(args.config, args.repeats)
+
+    assert baseline.repeats == 1
+    assert final.repeats == 3
+    assert final.model_copy(update={"repeats": 1}) == baseline
+    with pytest.raises(ValidationError):
+        load_run_config(args.config, 0)
 
 
 def test_eval_config_overrides_retrieval_settings_without_exposing_runtime_dsn() -> None:
@@ -341,7 +363,8 @@ async def test_json_and_markdown_are_rendered_from_one_structured_result(tmp_pat
         search_service=_SearchService([_search_record(relevant)]),
         embeddings=_Embeddings(),
     )
-    execution = await runner.run((_query(),), modes=("dense",))
+    negative = _query(relevance={}).model_copy(update={"case_id": "negative-case"})
+    execution = await runner.run((_query(), negative), modes=("dense",))
     dataset = load_retrieval_dataset(RETRIEVAL_ROOT)
     result = build_run_result(
         execution,
@@ -373,13 +396,16 @@ async def test_json_and_markdown_are_rendered_from_one_structured_result(tmp_pat
     assert result.modes[0].queries[0].results_used is None
     assert result.modes[0].queries[0].retrieved_memory_tokens.status == "unavailable"
     assert result.query_counts == {
-        "records": 1,
+        "records": 2,
         "positive": 1,
-        "negative": 0,
-        "slices": {"en": 1, "exact_identifier": 1},
+        "negative": 1,
+        "slices": {"en": 2, "exact_identifier": 1, "negative": 1},
     }
     assert '"run_id": "unit-run"' in json_text
     assert "unit-run" in markdown_text
     assert "relevant" in markdown_text
+    assert "## Slice metrics" in markdown_text
+    assert "| exact_identifier | 1 | 0 | 1 | 1 | unavailable | unavailable |" in markdown_text
+    assert "| negative | 0 | 1 | unavailable | unavailable | 1 | 0 |" in markdown_text
     assert "PostgreSQL decision" not in json_text
     assert "PostgreSQL decision" not in markdown_text

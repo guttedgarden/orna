@@ -151,6 +151,15 @@ def load_evaluation_config(path: Path) -> EvaluationConfig:
     return EvaluationConfig.model_validate(payload)
 
 
+def load_run_config(path: Path, repeats: int | None) -> EvaluationConfig:
+    """Меняет только число повторов для одного run, сохраняя frozen baseline.json."""
+
+    config = load_evaluation_config(path)
+    if repeats is None:
+        return config
+    return EvaluationConfig.model_validate({**config.model_dump(), "repeats": repeats})
+
+
 def apply_evaluation_config(settings: Settings, config: EvaluationConfig) -> Settings:
     """Применяет versioned eval parameters, не меняя production configuration."""
 
@@ -193,6 +202,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=("dev", "holdout"), default="dev")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--modes", default="dense,lexical,hybrid")
+    parser.add_argument("--repeats", type=int, default=None)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -446,7 +456,7 @@ def _hardware_metadata() -> dict[str, str | int | None]:
 async def run_isolated_evaluation(args: argparse.Namespace) -> tuple[Path, Path]:
     """Выполняет один isolated run с real pinned E5 и пишет два artifacts."""
 
-    config = load_evaluation_config(args.config)
+    config = load_run_config(args.config, args.repeats)
     modes = normalize_modes(args.modes)
     dataset = load_retrieval_split(args.config.parent, args.split)
     queries = dataset.queries

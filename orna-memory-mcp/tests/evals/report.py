@@ -290,6 +290,29 @@ def render_markdown(result: EvaluationRunResult) -> str:
         rendered = ["unavailable" if value is None else f"{value:.6g}" for value in values]
         lines.append(f"| {mode.mode} | " + " | ".join(rendered) + " |")
 
+    lines.extend(["", "## Slice metrics", ""])
+    for mode in result.modes:
+        lines.extend(
+            [
+                f"### {mode.mode}",
+                "",
+                "| Slice | Positive | Negative | Recall@5 | Top-1 | FP@5 | Abstention |",
+                "|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for name, metrics in mode.slice_metrics.items():
+            values = (
+                metrics["positive_queries"],
+                metrics["negative_queries"],
+                metrics["recall@5"],
+                metrics["top1_accuracy"],
+                metrics["false_positive@5"],
+                metrics["retrieval_abstention_accuracy"],
+            )
+            rendered = ["unavailable" if value is None else f"{value:.6g}" for value in values]
+            lines.append(f"| {name} | " + " | ".join(rendered) + " |")
+        lines.append("")
+
     lines.extend(["", "## Rankings", ""])
     for mode in result.modes:
         lines.append(f"### {mode.mode}")
