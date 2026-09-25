@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "dataset_version": "selection-dev-v1",
+  "frozen_at": "2026-09-25",
+  "provenance": "synthetic",
+  "sources": [
+    {
+      "source_ref": "synthetic-selection-v1",
+      "description": "Invented Atlas, Bridge, Ledger, Echo, Harbor and Portal engineering examples; no live incident or customer data."
+    }
+  ],
+  "label_policy": "Grade 2 direct answer or constraint; grade 1 concrete actionable partial; topic overlap alone grade 0. Labels fixed before scores.",
+  "limitations": "Small synthetic coding-domain dev set; no representativeness or task-level utility claim.",
+  "files": {
+    "corpus.jsonl": {
+      "records": 43,
+      "sha256": "3c2b85ffdcfa3cab043188ef345ac837184fc118a96a13bc9659b63daf33922d"
+    },
+    "dev.jsonl": {
+      "records": 30,
+      "sha256": "408a3b28aa3f31414065f95b5d5b082398534dccce91b2f2bfefc40cf85c835f"
+    }
+  },
+  "dev": {
+    "records": 30,
+    "positive": 16,
+    "negative": 14,
+    "slices": {
+      "cross_lingual": 6,
+      "en_to_ru": 1,
+      "exact_identifier": 3,
+      "lifecycle": 1,
+      "memory_type": 1,
+      "multi_record": 3,
+      "near_topic": 12,
+      "negative": 14,
+      "ood": 2,
+      "partial": 3,
+      "path": 2,
+      "ru_to_en": 5,
+      "semantic": 6,
+      "typo": 1,
+      "visibility": 2
+    }
+  },
+  "case_rationales": {
+    "p01": "The record directly names PostgreSQL 16 and pgvector.",
+    "p02": "Separate English schedule and retention records each provide one useful part of the combined answer.",
+    "p03": "Exact drill-log path is an actionable clue; the actual latest result is absent.",
+    "p04": "Bearer token and project context header are explicit.",
+    "p05": "Retry count and dead-letter action jointly answer the workflow.",
+    "p06": "Global EUR policy answers; beta USD record is foreign to alpha.",
+    "p07": "Sample rate, channels and container are explicit.",
+    "p08": "Revision 2 says 5 percent; old revision and beta project are inadmissible.",
+    "p09": "Retry-After is the concrete response constraint.",
+    "p10": "English memory states RRF k=60 exactly.",
+    "p11": "SHA-256 checksum file directly answers.",
+    "p12": "URL query-string state directly answers; typo-tolerant source path is a concrete partial clue.",
+    "p13": "invoice_id is the exact English record identifier.",
+    "p14": "Russian memory directly states ru-RU default.",
+    "p15": "Policy gives three retries; procedure has a different memory_type.",
+    "p16": "Alpha project record directly names the URL query string.",
+    "n01": "Nightly schedule and retention say nothing about the latest backup success; no backup-status location is given.",
+    "n02": "Authentication controls contain no person or rota assignment.",
+    "n03": "Retry rules and queue-depth metric do not identify any failed job at the stated time.",
+    "n04": "Tax jurisdiction and currency do not determine an approved rate.",
+    "n05": "Format, hints and logs contain no evaluation result.",
+    "n06": "Canary percentage and rollback rule give no start timestamp.",
+    "n07": "429 response policy gives no observed incident count.",
+    "n08": "Embedding profile name is not a tokenizer revision.",
+    "n09": "Route and state notes do not describe any crash date.",
+    "n10": "CI stage policy contains no measured duration.",
+    "n11": "Encryption-at-rest and auth signing-key rotation do not state backup-key rotation.",
+    "n12": "Browser session inactivity TTL is a different credential lifecycle.",
+    "n13": "No office facilities record exists in the corpus.",
+    "n14": "No cafeteria or menu record exists in the corpus."
+  }
+}
