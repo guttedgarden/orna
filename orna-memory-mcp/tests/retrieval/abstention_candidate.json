@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "rule": "cosine",
+  "threshold": 0.7560970720036345,
+  "embedding_profile": "e5-v1",
+  "embedding_snapshot": "66076b8dc6e367337e3e90e6fb309fb0f3addaf6",
+  "config": {
+    "strategy": "exact",
+    "pool": 20,
+    "rrf_k": 60,
+    "cutoff": 5,
+    "fts": "simple",
+    "repeats": 3,
+    "postfilter": "no refill"
+  },
+  "dev_artifact": "data/eval/phase-2/abstention-dev-20260925-run1/run.json",
+  "dev_artifact_sha256": "1941d548d844cd633fa05d2617305f9b1a82b58216e2db741a2f5ff03a471ed0",
+  "purpose": "fixed candidate for new independent validation; not approved for production"
+}
