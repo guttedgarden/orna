@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from time import perf_counter
@@ -186,6 +187,8 @@ async def run_trial(
     started = perf_counter()
     final = ""
     for _ in range(max_tool_rounds + 1):
+        request_messages = deepcopy(messages)
+        request_tools = deepcopy(tools)
         response = await completion(messages, tools)
         usage = response.get("usage") or {}
         for key, current in (("prompt_tokens", input_tokens), ("completion_tokens", output_tokens)):
@@ -211,6 +214,8 @@ async def run_trial(
                 "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
                     "reasoning_tokens"
                 ),
+                "request_messages": request_messages,
+                "request_tools": request_tools,
             }
         )
         if not calls:
@@ -221,6 +226,7 @@ async def run_trial(
         )
         for call in calls:
             name = call["function"]["name"]
+            search_started: float | None = None
             try:
                 args = json.loads(call["function"]["arguments"])
                 if name == "read_repo_file":
@@ -228,9 +234,16 @@ async def run_trial(
                     content = read_repo_file(checkout, path, allowed_paths)
                     event = {"tool": name, "path": path}
                 elif name == "memory_search" and search is not None:
+                    search_started = perf_counter()
                     results = await search(args["query"])
+                    search_latency_ms = round((perf_counter() - search_started) * 1000, 3)
                     content = json.dumps({"results": results}, ensure_ascii=False)
-                    event = {"tool": name, "query": args["query"], "results": results}
+                    event = {
+                        "tool": name,
+                        "query": args["query"],
+                        "results": results,
+                        "search_latency_ms": search_latency_ms,
+                    }
                     memory_context_bytes += len(content.encode("utf-8"))
                     if memory_context_tokens is not None:
                         memory_context_tokens += count_tokens(content)  # type: ignore[misc]
@@ -239,11 +252,14 @@ async def run_trial(
             except (KeyError, TypeError, ValueError) as error:
                 content = json.dumps({"error": type(error).__name__})
                 event = {"tool": name, "error": type(error).__name__}
+                if search_started is not None:
+                    event["search_latency_ms"] = round((perf_counter() - search_started) * 1000, 3)
             events.append(event)
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         if prompts.get("after_tool"):
             messages.append({"role": "user", "content": prompts["after_tool"]})
     summary = summarize_tool_events(events, final)
+    reasoning_values = [event["reasoning_tokens"] for event in completion_events]
     return {
         "final_artifact": final,
         "tool_events": events,
@@ -251,7 +267,17 @@ async def run_trial(
         "latency_ms": round((perf_counter() - started) * 1000, 3),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "reasoning_tokens": (
+            sum(reasoning_values)
+            if all(isinstance(value, int) for value in reasoning_values)
+            else None
+        ),
         "memory_context_tokens": memory_context_tokens,
         "memory_context_bytes": memory_context_bytes,
+        "memory_search_latency_ms": round(
+            sum(event["search_latency_ms"] for event in events if "search_latency_ms" in event),
+            3,
+        ),
+        "post_template_prompt_tokens_exact": None,
         **summary,
     }

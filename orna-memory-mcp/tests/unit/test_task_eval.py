@@ -96,6 +96,7 @@ def test_pair_summary_keeps_context_cost_distinct_from_total_token_delta() -> No
             "memory_context_tokens": 30,
             "input_tokens": 100,
             "output_tokens": 10,
+            "reasoning_tokens": 7,
         },
         {
             "task_id": "a",
@@ -105,6 +106,7 @@ def test_pair_summary_keeps_context_cost_distinct_from_total_token_delta() -> No
             "memory_context_tokens": 0,
             "input_tokens": 50,
             "output_tokens": 10,
+            "reasoning_tokens": 3,
         },
         {
             "task_id": "b",
@@ -114,6 +116,7 @@ def test_pair_summary_keeps_context_cost_distinct_from_total_token_delta() -> No
             "memory_context_tokens": 20,
             "input_tokens": 100,
             "output_tokens": 10,
+            "reasoning_tokens": 8,
         },
         {
             "task_id": "b",
@@ -123,12 +126,39 @@ def test_pair_summary_keeps_context_cost_distinct_from_total_token_delta() -> No
             "memory_context_tokens": 0,
             "input_tokens": 50,
             "output_tokens": 10,
+            "reasoning_tokens": 2,
         },
     ]
     summary = summarize_pairs(trials)
     assert summary["on_regressions"] == 1
     assert summary["extra_context_tokens_per_successful_task"] == 50
     assert summary["total_token_delta_on_minus_off"] == 100
+    assert summary["provider_input_token_delta_on_minus_off"] == 100
+    assert summary["provider_output_token_delta_on_minus_off"] == 0
+    assert summary["pair_costs"] == [
+        {
+            "task_id": "a",
+            "repeat": 0,
+            "input_delta": 50,
+            "output_delta": 0,
+            "reasoning_delta": 4,
+            "total_delta": 50,
+        },
+        {
+            "task_id": "b",
+            "repeat": 0,
+            "input_delta": 50,
+            "output_delta": 0,
+            "reasoning_delta": 6,
+            "total_delta": 50,
+        },
+    ]
+    assert summary["provider_reasoning_token_delta_on_minus_off"] == 10
+    trials[0]["reasoning_tokens"] = None
+    missing = summarize_pairs(trials)
+    assert missing["provider_reasoning_token_delta_on_minus_off"] is None
+    assert missing["on_metrics"]["reasoning_tokens"] is None
+    assert missing["provider_output_token_delta_on_minus_off"] == 0
     trials[0]["success"] = False
     assert summarize_pairs(trials)["extra_context_tokens_per_successful_task"] is None
 
@@ -350,5 +380,74 @@ async def test_adapter_exposes_only_approved_difference(tmp_path: Path) -> None:
     assert on["memory_context_tokens"] > 0
     assert on["results_used"] == ["memory-1"]
     assert on["input_tokens"] == off["input_tokens"] == 20
+    assert off["memory_search_calls"] == 0
+    assert on["tool_events"][1]["search_latency_ms"] >= 0
+    assert on["memory_search_latency_ms"] == on["tool_events"][1]["search_latency_ms"]
+    assert on["completion_events"][0]["input_tokens"] == 10
+    assert on["completion_events"][0]["reasoning_tokens"] is None
+    assert on["reasoning_tokens"] is None
+    assert on["completion_events"][0]["request_messages"] == [
+        {"role": "system", "content": "same\nsearch memory"},
+        {"role": "user", "content": case.prompt},
+    ]
+    assert [tool["function"]["name"] for tool in on["completion_events"][0]["request_tools"]] == [
+        "read_repo_file",
+        "memory_search",
+    ]
+    assert any(
+        message["role"] == "tool" and "incident" in message["content"]
+        for message in on["completion_events"][1]["request_messages"]
+    )
+    assert on["post_template_prompt_tokens_exact"] is None
     with pytest.raises(ValueError, match="allowlist"):
         read_repo_file(tmp_path, "tests/retrieval/memory_holdout.jsonl", {case.rubric.source_path})
+
+
+@pytest.mark.asyncio
+async def test_every_memory_search_call_has_own_latency(tmp_path: Path) -> None:
+    case = load_cases(TASK_ROOT / "cases.jsonl")[0]
+
+    class TwoSearchCompletion:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
+            self.calls += 1
+            if self.calls == 1:
+                message = {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": str(index),
+                            "function": {
+                                "name": "memory_search",
+                                "arguments": json.dumps({"query": str(index)}),
+                            },
+                        }
+                        for index in (1, 2)
+                    ],
+                }
+            else:
+                message = {"content": "{}"}
+            return {"choices": [{"message": message}], "usage": {}}
+
+    async def search(query: str) -> list[dict]:
+        return [{"id": query, "content": query}]
+
+    outcome = await run_trial(
+        case=case,
+        checkout=tmp_path,
+        condition="on",
+        completion=TwoSearchCompletion(),
+        search=search,
+        prompts={"base": "base", "on_extra": "search"},
+        allowed_paths=set(),
+        max_tool_rounds=1,
+    )
+    assert outcome["memory_search_calls"] == 2
+    assert len([event["search_latency_ms"] for event in outcome["tool_events"]]) == 2
+    assert outcome["memory_search_latency_ms"] == round(
+        sum(event["search_latency_ms"] for event in outcome["tool_events"]), 3
+    )
+    assert outcome["input_tokens"] is None
+    assert outcome["reasoning_tokens"] is None

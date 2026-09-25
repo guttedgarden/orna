@@ -106,6 +106,38 @@ def summarize_pairs(trials: list[dict]) -> dict:
         if all(value is not None for value in token_values)
         else None
     )
+    pair_costs = []
+    for (task_id, repeat), pair in sorted(pairs.items()):
+        a, b = pair["on"], pair["off"]
+        input_delta = (
+            a["input_tokens"] - b["input_tokens"]
+            if a.get("input_tokens") is not None and b.get("input_tokens") is not None
+            else None
+        )
+        output_delta = (
+            a["output_tokens"] - b["output_tokens"]
+            if a.get("output_tokens") is not None and b.get("output_tokens") is not None
+            else None
+        )
+        reasoning_delta = (
+            a["reasoning_tokens"] - b["reasoning_tokens"]
+            if a.get("reasoning_tokens") is not None and b.get("reasoning_tokens") is not None
+            else None
+        )
+        pair_costs.append(
+            {
+                "task_id": task_id,
+                "repeat": repeat,
+                "input_delta": input_delta,
+                "output_delta": output_delta,
+                "reasoning_delta": reasoning_delta,
+                "total_delta": (
+                    input_delta + output_delta
+                    if input_delta is not None and output_delta is not None
+                    else None
+                ),
+            }
+        )
 
     def condition_metrics(items: list[dict]) -> dict:
         return {
@@ -142,6 +174,11 @@ def summarize_pairs(trials: list[dict]) -> dict:
                 if all(item.get("output_tokens") is not None for item in items)
                 else None
             ),
+            "reasoning_tokens": (
+                sum(item["reasoning_tokens"] for item in items)
+                if all(item.get("reasoning_tokens") is not None for item in items)
+                else None
+            ),
         }
 
     return {
@@ -163,6 +200,22 @@ def summarize_pairs(trials: list[dict]) -> dict:
         ),
         "extra_context_tokens_per_successful_task": context_cost,
         "total_token_delta_on_minus_off": token_delta,
+        "provider_input_token_delta_on_minus_off": (
+            sum(item["input_delta"] for item in pair_costs)
+            if all(item["input_delta"] is not None for item in pair_costs)
+            else None
+        ),
+        "provider_output_token_delta_on_minus_off": (
+            sum(item["output_delta"] for item in pair_costs)
+            if all(item["output_delta"] is not None for item in pair_costs)
+            else None
+        ),
+        "provider_reasoning_token_delta_on_minus_off": (
+            sum(item["reasoning_delta"] for item in pair_costs)
+            if all(item["reasoning_delta"] is not None for item in pair_costs)
+            else None
+        ),
+        "pair_costs": pair_costs,
         "on_metrics": condition_metrics(on),
         "off_metrics": condition_metrics(off),
     }
