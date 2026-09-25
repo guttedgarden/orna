@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "corpus_version": "p2-05-pilot-v1",
+  "client": "openai-compatible-chat-completions",
+  "endpoint": null,
+  "model": null,
+  "model_version": null,
+  "temperature": 0,
+  "max_output_tokens": 1024,
+  "max_tool_rounds": 4,
+  "timeout_seconds": 120,
+  "repeats": 2,
+  "seed": 23,
+  "project_id": "orna-pilot",
+  "retrieval": {
+    "dense_strategy": "exact",
+    "fts_config": "simple",
+    "candidate_pool_size": 20,
+    "rrf_k": 60,
+    "embedding_profile": "e5-v1"
+  },
+  "tokenizer": null,
+  "prompts": {
+    "base": "Use the provided read_repo_file tool to check current source. Allowed source paths are orna-memory-mcp/app/embeddings.py and orna-memory-mcp/app/config.py. Return one JSON object with string answer_key, array evidence of repo-relative paths, and array memory_ids_used of memory UUIDs directly used in the answer. No prose or markdown. Do not write files.",
+    "on_extra": "Before reading source or answering, call memory_search once with a query about this task. Then check current repository source. Memory can be stale, so use the source to resolve conflicts.",
+    "off_extra": "",
+    "after_tool": "Continue the same task using the tool results. Call another tool if needed, then return the requested JSON object."
+  },
+  "tools": {
+    "shared": [
+      "read_repo_file"
+    ],
+    "on_only": [
+      "memory_search"
+    ],
+    "off_only": []
+  },
+  "environment": {
+    "checkout": "git archive of pinned repo_ref per trial",
+    "memory_corpus": "separate migrated loopback PostgreSQL eval DB; read-only search service",
+    "context": "new chat messages and new checkout per trial"
+  }
+}

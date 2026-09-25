@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "model": "google/gemma-4-e2b",
+  "model_version": "google/gemma-4-e2b@4bit",
+  "tokenizer_source": "lmstudio-community/gemma-4-E2B-it-MLX-4bit/tokenizer.json",
+  "tokenizer_sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+  "library": "tokenizers",
+  "library_version": "0.23.2",
+  "scope": "serialized memory_search JSON tool message content; add_special_tokens=False; excludes chat template envelope"
+}

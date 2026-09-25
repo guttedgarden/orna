@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "dataset_version": "phase-2-v1",
+  "frozen_at": "2026-09-15",
+  "split_policy": "Group incidents, topics and sessions before writing queries; no relevance key or split_group may appear in both dev and holdout.",
+  "holdout_policy": "Keep memory_holdout.jsonl frozen and never use its rankings, errors or distractors for parameter selection; a consulted holdout becomes dev and requires a new independent holdout.",
+  "sources": [
+    {
+      "source_ref": "phase0-memory-journal",
+      "description": "Anonymized Phase 0 seed candidates rechecked against current repository sources."
+    },
+    {
+      "source_ref": "phase1-schema-domain",
+      "description": "Verified Phase 1 schema, domain model and write-safety invariants."
+    },
+    {
+      "source_ref": "phase1-runtime",
+      "description": "Verified Phase 1 MCP, Compose and offline-cache behavior."
+    },
+    {
+      "source_ref": "phase1-remediation",
+      "description": "Anonymized defects reproduced and fixed during Phase 1 remediation."
+    },
+    {
+      "source_ref": "phase1-retrieval-tests",
+      "description": "Verified retrieval, identifier and isolation cases from Phase 1 tests."
+    }
+  ],
+  "files": {
+    "corpus.jsonl": {
+      "records": 36,
+      "sha256": "691234d6c80068af6188dae7d71a909a9bf62b03a056cf3b5f4c054e31e21576"
+    },
+    "memory_dev.jsonl": {
+      "records": 24,
+      "sha256": "ab96a1f1c29e7a2ed6733ba4a44cb7269d054eb160ad4b62f677946a0e7ed120"
+    },
+    "memory_holdout.jsonl": {
+      "records": 20,
+      "sha256": "93e9dd4a88dbb0545ac04c70c1fdd7c81421d9b114a659c65f7bf49c90d71add"
+    }
+  },
+  "splits": {
+    "dev": {
+      "records": 24,
+      "positive": 18,
+      "negative": 6,
+      "slices": {
+        "contradiction": 1,
+        "cross_lingual": 10,
+        "en_to_ru": 1,
+        "exact_identifier": 9,
+        "lifecycle": 4,
+        "mixed": 8,
+        "negative": 6,
+        "partial_identifier": 1,
+        "path": 3,
+        "ru_to_en": 9,
+        "semantic": 8,
+        "split_identifier": 1,
+        "typo": 1,
+        "visibility": 1
+      }
+    },
+    "holdout": {
+      "records": 20,
+      "positive": 15,
+      "negative": 5,
+      "slices": {
+        "contradiction": 2,
+        "cross_lingual": 9,
+        "en_to_ru": 2,
+        "exact_identifier": 7,
+        "lifecycle": 2,
+        "mixed": 6,
+        "negative": 5,
+        "partial_identifier": 1,
+        "ru_to_en": 7,
+        "semantic": 12,
+        "split_identifier": 2,
+        "typo": 1,
+        "visibility": 1
+      }
+    }
+  }
+}
