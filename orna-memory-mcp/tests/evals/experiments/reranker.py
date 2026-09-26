@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import selectors
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
@@ -121,11 +124,11 @@ class QwenWorkerClient:
         self.timeout_seconds = timeout_seconds
         self.runtime = Path(__file__).with_name("qwen_runtime")
 
-    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _launch_options(self, operation="score"):
         command = [
             str(self.runtime / ".venv/bin/python"),
             str(self.runtime / "worker.py"),
-            "score",
+            operation,
             "--model",
             "Qwen/Qwen3-Reranker-0.6B",
             "--revision",
@@ -165,6 +168,10 @@ class QwenWorkerClient:
                 "MKL_NUM_THREADS": "6",
             }
         )
+        return command, environment
+
+    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+        command, environment = self._launch_options()
         try:
             completed = subprocess.run(
                 command,
@@ -183,3 +190,98 @@ class QwenWorkerClient:
             return json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise RerankerError("worker returned invalid JSON") from exc
+
+
+class QwenWorkerSession(QwenWorkerClient):
+    """Eval-only JSONL сессия: одна модель, последовательные requests, fail closed."""
+
+    def __init__(self, cache_dir, *, timeout_seconds=180, command=None, check_budget=None):
+        super().__init__(cache_dir, timeout_seconds=timeout_seconds)
+        self.command = command
+        self.check_budget = check_budget or (lambda: None)
+        self.process = None
+        self.ready = None
+        self.buffer = b""
+        self.peak_rss_bytes = 0
+
+    def __enter__(self):
+        command, environment = self._launch_options("session")
+        self.errors = tempfile.TemporaryFile()
+        self.process = subprocess.Popen(
+            self.command or command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.errors,
+            env=environment,
+            bufsize=0,
+        )
+        try:
+            self.ready = self._read(120)
+            if self.ready.get("ready") is not True:
+                raise RerankerError("worker did not acknowledge ready")
+        except BaseException:
+            self.close(kill=True)
+            raise
+        return self
+
+    def _read(self, timeout):
+        deadline = perf_counter() + timeout
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            while b"\n" not in self.buffer:
+                self.check_budget()
+                remaining = deadline - perf_counter()
+                if remaining <= 0:
+                    raise RerankerError("worker session timeout")
+                if not selector.select(min(0.05, remaining)):
+                    continue
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+                if not chunk:
+                    raise RerankerError("worker session exited before response")
+                self.buffer += chunk
+            line, self.buffer = self.buffer.split(b"\n", 1)
+        try:
+            response = json.loads(line)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RerankerError("worker returned invalid JSON") from exc
+        if not isinstance(response, dict) or "error" in response:
+            raise RerankerError("worker session error")
+        self.peak_rss_bytes = max(self.peak_rss_bytes, response.get("worker_peak_rss_bytes", 0))
+        if self.peak_rss_bytes > 6 * 1024**3:
+            raise RerankerError("worker RSS budget exceeded")
+        return response
+
+    def __call__(self, request):
+        try:
+            self.check_budget()
+            payload = (json.dumps(request, ensure_ascii=False) + "\n").encode()
+            view = memoryview(payload)
+            while view:
+                count = self.process.stdin.write(view)
+                view = view[count:]
+            response = self._read(self.timeout_seconds)
+            if self.ready.get("pid") is not None and response.get("pid") != self.ready["pid"]:
+                raise RerankerError("worker PID changed during session")
+            if response.get("case_id") != request.get("case_id"):
+                raise RerankerError("session case ID mismatch")
+            return response
+        except BaseException:
+            self.close(kill=True)
+            raise
+
+    def close(self, *, kill=False):
+        if self.process is not None:
+            if kill and self.process.poll() is None:
+                self.process.kill()
+            if not self.process.stdin.closed:
+                self.process.stdin.close()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+            self.process.stdout.close()
+            self.errors.close()
+
+    def __exit__(self, *args):
+        self.close(kill=args[0] is not None)

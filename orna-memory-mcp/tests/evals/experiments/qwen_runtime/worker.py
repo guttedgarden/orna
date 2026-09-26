@@ -540,9 +540,58 @@ def _run_smoke(snapshot: Path, args, manifest: dict) -> dict:
     return evidence
 
 
+def _session(snapshot, args, manifest):
+    """Одна загрузка модели на stdin JSONL session; EOF завершает процесс."""
+    started = perf_counter()
+    with _timeout(120):
+        runtime = Reranker(snapshot, args)
+    metadata = {
+        "ready": True,
+        "pid": os.getpid(),
+        "load_seconds": perf_counter() - started,
+        "worker_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "model": MODEL,
+        "revision": REVISION,
+        "instruction": INSTRUCTION,
+        "instruction_id": args.instruction_id,
+        "prefix": PREFIX,
+        "suffix": SUFFIX,
+        "yes_token_id": runtime.yes_id,
+        "no_token_id": runtime.no_id,
+        "python": platform.python_version(),
+        "packages": PINS,
+        "cache_manifest": manifest,
+        "worker_sha256": _sha256(Path(__file__)),
+        "lock_sha256": _sha256(Path(__file__).with_name("uv.lock")),
+        "runtime": {
+            k: getattr(args, k)
+            for k in (
+                "device",
+                "dtype",
+                "attention",
+                "max_length",
+                "batch_size",
+                "threads",
+                "interop_threads",
+                "seed",
+                "query_timeout_seconds",
+            )
+        },
+    }
+    print(json.dumps(metadata), flush=True)
+    for line in sys.stdin:
+        request = json.loads(line)
+        response = _score_request(runtime, request)
+        response.update(
+            pid=os.getpid(),
+            worker_peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        )
+        print(json.dumps(response, ensure_ascii=False), flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("smoke", "score"))
+    parser.add_argument("operation", choices=("smoke", "score", "session"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--cache-dir", type=Path, required=True)
@@ -565,6 +614,9 @@ def main() -> int:
         if args.operation == "smoke" and (args.output is None or args.output.exists()):
             raise WorkerError("new --output directory required")
         snapshot, manifest = verify_environment(args)
+        if args.operation == "session":
+            _session(snapshot, args, manifest)
+            return 0
         if args.operation == "score":
             runtime = Reranker(snapshot, args)
             request = json.loads(sys.stdin.read())
