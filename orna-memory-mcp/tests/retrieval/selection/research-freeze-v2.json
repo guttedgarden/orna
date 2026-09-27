@@ -1,0 +1,9 @@
+{
+  "candidate_sha256": "0638e88e75e7caa780d64bc2050200a120a8210c9a1bb05befb63ceb1348681f",
+  "replay_sha256": "49523b9f4c98be11de8bb11496db5d64254ed890f7af20268c75119a7661c175",
+  "threshold": 0.7744954519215141,
+  "frozen_at": "2026-09-26T08:33:21.824073+00:00",
+  "policy": "selection-protocol-v2",
+  "research_only": true,
+  "production_admitted": false
+}

@@ -88,10 +88,17 @@ def test_missing_repeat_or_small_near_slice_is_insufficient():
 def test_quality_signal_never_overrides_failed_cost():
     from tests.evals.experiments.reranker_selection import candidate_admitted
 
-    assert candidate_admitted(0.8, {"swap": False}) is False
-    assert candidate_admitted(0.8, {"rss": None}) is False
-    assert candidate_admitted(None, {"rss": True}) is False
-    assert candidate_admitted(0.8, {"rss": True}) is True
+    assert candidate_admitted(0.8, {"rss": False}, validation_pass=True) is False
+    assert candidate_admitted(0.8, {"rss": None}, validation_pass=True) is False
+    assert candidate_admitted(None, {"rss": True}, validation_pass=True) is False
+    assert candidate_admitted(0.8, {"rss": True}, validation_pass=True) is True
+
+
+@pytest.mark.parametrize("validation_pass", [False, None])
+def test_dev_or_failed_validation_cannot_gain_admission_when_cost_passes(validation_pass):
+    from tests.evals.experiments.reranker_selection import candidate_admitted
+
+    assert candidate_admitted(0.8, {"rss": True}, validation_pass=validation_pass) is False
 
 
 def test_session_uses_one_process_and_closes_it(tmp_path):
@@ -149,6 +156,28 @@ def test_resource_peak_growth_and_simultaneous_rss():
     assert result["swap_no_growth"] is False
     assert result["aggregate_peak_rss_bytes"] == 1500
     assert result["worker_peak_rss_bytes"] == 800
+    assert result["aggregate_rss_pass"] is True
+    assert result["worker_rss_pass"] is True
+
+
+def test_missing_swap_does_not_invalidate_healthy_rss_measurement():
+    from tests.evals.experiments.selection_resources import summarize_resources
+
+    result = summarize_resources(
+        [
+            {
+                "elapsed_seconds": i * 0.05,
+                "swap_used_bytes": None,
+                "rss_bytes": 1500,
+                "worker_rss_bytes": 800,
+            }
+            for i in range(3)
+        ]
+    )
+    assert result["swap_no_growth"] is None
+    assert result["host_swap_role"] == "diagnostic_only"
+    assert result["aggregate_rss_pass"] is True
+    assert result["worker_rss_pass"] is True
 
 
 def test_missing_resource_samples_never_pass():
@@ -235,6 +264,10 @@ def test_runner_preflight_failure_writes_partial_artifact(tmp_path, monkeypatch)
     assert artifact["status"] == "partial"
     assert artifact["candidate_admitted"] is False
     assert artifact["cost_gates"]["aggregate_rss"] is None
+    assert "swap" not in artifact["cost_gates"]
+    assert "p2_5_03_resource_gate" not in artifact["admission_gates"]
+    assert artifact["admission_gates"]["independent_quality_validation"] is False
+    assert artifact["host_swap_role"] == "diagnostic_only"
     assert not (output / "reranker-candidate.json").exists()
     with pytest.raises(FileExistsError):
         asyncio.run(
@@ -285,3 +318,242 @@ def test_aggregate_gap_over_100ms_is_unknown():
     result = summarize_resources(rows)
     assert result["aggregate_rss_pass"] is None
     assert result["swap_no_growth"] is True
+
+
+@pytest.mark.parametrize(
+    ("after", "passes"),
+    [
+        (["b", "a", "c"], True),
+        (["c", "a", "b"], False),
+        (["b", "a"], False),
+        (["x", "a", "b", "c"], False),
+        ([], False),
+    ],
+)
+def test_v2_preserves_ids_and_top1_grade(after, passes):
+    from tests.evals.experiments.reranker_selection import preservation
+
+    queries = [{"case_id": "p", "relevance": {"a": 2, "b": 2, "c": 1}}]
+    regressions, _, _ = preservation(queries, {"p": ["a", "b", "c"]}, {"p": after})
+    assert (not regressions) is passes
+
+
+def test_v1_remains_reproducible_and_v2_allows_equivalent_top1():
+    from tests.evals.experiments.reranker_selection import analyze_repeats
+
+    q, r = fixture()
+    q[0]["relevance"]["b"] = 2
+    for repeat in r:
+        repeat[0]["scores"][1]["score"] = 0.99
+    assert analyze_repeats(q, r, policy="selection-protocol-v1")["quality_threshold"] is None
+    assert analyze_repeats(q, r)["quality_threshold"] is not None
+
+
+def test_fixed_validation_does_not_sweep_or_select_another_threshold():
+    from tests.evals.experiments.reranker_selection import analyze_repeats
+
+    q, r = fixture()
+    result = analyze_repeats(q, r, fixed_threshold=0.95)
+    assert [t["threshold"] for t in result["trials"]] == [0.95]
+    assert result["quality_threshold"] is None
+
+
+def test_process_sampler_survives_blocked_parent_and_collects_final_sample(tmp_path):
+    import json
+    import time
+
+    from tests.evals.experiments.selection_resources import ProcessSessionMonitor
+
+    output = tmp_path / "resources.jsonl"
+    with ProcessSessionMonitor(output) as monitor:
+        assert monitor.process.pid != __import__("os").getpid()
+        monitor.phase = "blocked-parent"
+        # Native main-thread sleep does not drive the collector or drain a pipe.
+        time.sleep(0.25)
+        monitor.check()
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len([r for r in rows if r["phase"] == "blocked-parent"]) >= 2
+    assert rows[-1]["final_sample"] is True
+    assert str(__import__("os").getpid()) in rows[-1]["processes"]
+    assert not monitor.process.is_alive()
+
+
+def test_absolute_sampler_schedule_does_not_add_probe_duration():
+    from tests.evals.experiments.selection_resources import next_sample_delay
+
+    deadline, delay = next_sample_delay(10.0, 10.017)
+    assert deadline == 10.025
+    assert delay == pytest.approx(0.008)
+    _, delay = next_sample_delay(10.0, 10.12)
+    assert delay == 0
+
+
+def test_validation_candidate_hash_is_checked_before_inference(tmp_path):
+    import json
+
+    from tests.evals.experiments.selection_dev_run import load_research_candidate
+
+    p = tmp_path / "candidate.json"
+    p.write_text(json.dumps({"threshold": 0.5}))
+    with pytest.raises(ValueError, match="hash"):
+        load_research_candidate(p, "0" * 64)
+
+
+@pytest.mark.parametrize("owned", ["qwen", "embedding"])
+def test_process_sampler_deadline_stops_owned_worker_and_keeps_partial(tmp_path, owned):
+    import subprocess
+    import sys
+    import time
+
+    from tests.evals.experiments.selection_resources import ProcessSessionMonitor
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        with ProcessSessionMonitor(
+            tmp_path / "resources.jsonl", worker=lambda: child if owned == "qwen" else None
+        ) as monitor:
+            if owned == "embedding":
+                monitor.state["embedding_worker"].value = child.pid
+            monitor.query_deadline = time.perf_counter() + 0.1
+            monitor.check()
+            child.wait(timeout=3)
+            with pytest.raises(RuntimeError, match="query_deadline exceeded"):
+                monitor.check()
+        assert monitor.summary()["aggregate_rss_pass"] is None
+        assert (tmp_path / "resources.jsonl").stat().st_size > 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_validation_never_enumerates_alternative_scores():
+    from tests.evals.experiments.reranker_selection import analyze_repeats
+
+    q, r = fixture()
+    result = analyze_repeats(q, r, fixed_threshold=0.7)
+    assert len(result["trials"]) == 1
+    assert result["trials"][0]["threshold"] == 0.7
+    assert result["quality_threshold"] == 0.7
+
+
+def test_partial_sampler_json_does_not_mask_budget_failure(tmp_path):
+    from tests.evals.experiments.selection_resources import ProcessSessionMonitor
+
+    p = tmp_path / "resources.jsonl"
+    p.write_text('{"unfinished":')
+    monitor = ProcessSessionMonitor(p)
+    monitor.state["error"].value = b"aggregate RSS budget exceeded"
+    summary = monitor.summary()
+    assert summary["aggregate_rss_pass"] is None
+    assert "aggregate RSS budget exceeded" in summary["sampling_error"]
+
+
+def test_owned_embedding_process_is_killable_without_harness_exit(tmp_path):
+    import asyncio
+    import sys
+
+    from tests.evals.experiments.selection_embedding import ProcessEmbeddingExecutor
+
+    async def scenario():
+        fake = tmp_path / "fake.py"
+        fake.write_text("import time; time.sleep(20)")
+        executor = ProcessEmbeddingExecutor(None, command=[sys.executable, str(fake)])
+        pid = executor.process.pid
+        await executor.aclose()
+        assert pid and executor.process.poll() is not None
+
+    asyncio.run(scenario())
+
+
+def test_frozen_identity_compares_serialized_tuple_fields():
+    from tests.evals.experiments.selection_dev_run import same_identity
+
+    assert same_identity({"files": ("a", "b")}, {"files": ["a", "b"]})
+    assert not same_identity({"files": ("a", "b")}, {"files": ["b", "a"]})
+
+
+def test_e5_json_write_handles_partial_pipe_writes():
+    import json
+
+    from tests.evals.experiments.selection_embedding import write_json
+
+    class ShortWriter:
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, chunk):
+            self.data.extend(chunk[:3])
+            return min(3, len(chunk))
+
+    stream = ShortWriter()
+    payload = {"text": "Русский запрос " * 1000}
+    write_json(stream, payload)
+    assert json.loads(stream.data) == payload
+
+
+def test_e5_cleanup_wait_is_bounded():
+    import asyncio
+    import io
+    import subprocess
+    from types import SimpleNamespace
+
+    from tests.evals.experiments.selection_embedding import ProcessEmbeddingExecutor
+
+    def wait(*, timeout):
+        assert timeout <= 3
+        raise subprocess.TimeoutExpired("fake-e5", timeout)
+
+    executor = ProcessEmbeddingExecutor.__new__(ProcessEmbeddingExecutor)
+    executor.process = SimpleNamespace(
+        poll=lambda: 0, wait=wait, stdin=io.BytesIO(), stdout=io.BytesIO()
+    )
+    executor.errors = io.BytesIO()
+    executor.monitor = None
+    with pytest.raises(RuntimeError, match="cleanup timeout"):
+        asyncio.run(executor.aclose())
+    assert executor.process.stdin.closed and executor.process.stdout.closed
+
+
+def test_validation_rejects_changed_threshold_even_with_supplied_matching_hash(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from tests.evals.experiments import selection_dev_run as runner
+
+    p = tmp_path / "candidate.json"
+    p.write_text(json.dumps({"threshold": 0.9}))
+    (tmp_path / "research-freeze-v2.json").write_text(
+        json.dumps({"candidate_sha256": "a" * 64, "threshold": 0.8})
+    )
+    monkeypatch.setattr(runner, "DEV", tmp_path)
+    with pytest.raises(ValueError, match="anchor"):
+        runner.load_research_candidate(p, runner.digest(p))
+
+
+def test_e5_request_path_handles_partial_pipe_writes(monkeypatch):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from tests.evals.experiments import selection_embedding as module
+
+    class ShortWriter:
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, chunk):
+            self.data.extend(chunk[:3])
+            return min(3, len(chunk))
+
+    stream = ShortWriter()
+    executor = module.ProcessEmbeddingExecutor.__new__(module.ProcessEmbeddingExecutor)
+    executor.process = SimpleNamespace(
+        stdin=stream, stdout=SimpleNamespace(fileno=lambda: 123), poll=lambda: None
+    )
+    executor.monitor = None
+    executor.first = False
+    monkeypatch.setattr(module.os, "read", lambda *_: b'{"vector":[1.0]}\n')
+    assert asyncio.run(executor.embed_query("request" * 1000)) == [1.0]
+    assert json.loads(stream.data) == {"operation": "query", "text": "request" * 1000}

@@ -198,3 +198,31 @@ def test_e5_input_guard_counts_full_prefixed_query_without_truncation(tmp_path: 
 def test_missing_pinned_tokenizer_has_explicit_dataset_error(tmp_path: Path) -> None:
     with pytest.raises(DatasetValidationError, match="pinned E5 tokenizer unavailable"):
         load_selection_dev(ROOT, tokenizer_path=tmp_path / "missing-tokenizer.json")
+
+
+def test_validation_loader_is_explicit_and_checks_hash_without_opening_closed_sets(tmp_path):
+    from tests.evals.experiments.selection_dataset import load_selection_validation
+
+    root = _copy_dataset(tmp_path)
+    (root / "dev.jsonl").rename(root / "validation.jsonl")
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["files"]["validation.jsonl"] = manifest["files"].pop("dev.jsonl")
+    manifest["validation"] = manifest.pop("dev")
+    manifest["dataset_version"] = "selection-validation-v2"
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(DatasetValidationError):
+        load_selection_dev(root)
+    dataset = load_selection_validation(root)
+    assert len(dataset.queries) == 30
+    with (root / "validation.jsonl").open("a") as stream:
+        stream.write("\n")
+    with pytest.raises(DatasetValidationError, match="hash mismatch"):
+        load_selection_validation(root)
+
+
+def test_independence_rejects_renamed_dev_source_groups():
+    from tests.evals.experiments.selection_dataset import validate_independence
+
+    dev = load_selection_dev(ROOT)
+    with pytest.raises(DatasetValidationError, match="overlap"):
+        validate_independence(dev, dev)

@@ -48,7 +48,7 @@ _SLICES = frozenset(
 )
 
 
-class SelectionManifest(BaseModel):
+class SelectionManifestBase(BaseModel):
     """Только метаданные dev; validation отсутствует даже в schema."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -61,13 +61,20 @@ class SelectionManifest(BaseModel):
     label_policy: str = Field(min_length=1)
     limitations: str = Field(min_length=1)
     files: dict[str, FileRecord]
-    dev: SplitRecord
     case_rationales: dict[str, str]
+
+
+class SelectionManifest(SelectionManifestBase):
+    dev: SplitRecord
+
+
+class SelectionValidationManifest(SelectionManifestBase):
+    validation: SplitRecord
 
 
 @dataclass(frozen=True, slots=True)
 class SelectionDev:
-    manifest: SelectionManifest
+    manifest: SelectionManifest | SelectionValidationManifest
     corpus: tuple[CorpusRecord, ...]
     queries: tuple[QueryRecord, ...]
 
@@ -205,15 +212,28 @@ def validate_e5_inputs(dataset: SelectionDev, tokenizer_path: Path) -> dict[str,
 def load_selection_dev(root: Path, *, tokenizer_path: Path | None = None) -> SelectionDev:
     """Читает ровно manifest/corpus/dev; токены проверяются при переданном tokenizer."""
 
+    return _load_selection(root, split="dev", tokenizer_path=tokenizer_path)
+
+
+def load_selection_validation(root: Path, *, tokenizer_path: Path | None = None) -> SelectionDev:
+    """Явный новый validation split; не вызывает старые dataset loaders."""
+    return _load_selection(root, split="validation", tokenizer_path=tokenizer_path)
+
+
+def _load_selection(root, *, split, tokenizer_path):
     root = Path(root)
+    query_file = f"{split}.jsonl"
+    manifest_class = SelectionManifest if split == "dev" else SelectionValidationManifest
     try:
-        manifest = SelectionManifest.model_validate(
+        manifest = manifest_class.model_validate(
             json.loads(_allowed_path(root, "manifest.json").read_text(encoding="utf-8"))
         )
     except (OSError, json.JSONDecodeError, ValidationError) as exc:
         raise DatasetValidationError(f"invalid selection manifest: {exc}") from exc
-    if set(manifest.files) != _FILES:
-        raise DatasetValidationError("selection manifest allows only corpus.jsonl and dev.jsonl")
+    if set(manifest.files) != {"corpus.jsonl", query_file}:
+        raise DatasetValidationError(
+            f"selection manifest allows only corpus.jsonl and {query_file}"
+        )
     _ensure_unique([source.source_ref for source in manifest.sources], "source_ref")
     try:
         corpus = tuple(
@@ -224,7 +244,7 @@ def load_selection_dev(root: Path, *, tokenizer_path: Path | None = None) -> Sel
         )
         queries = tuple(
             QueryRecord.model_validate(value)
-            for value in _read_jsonl(_allowed_path(root, "dev.jsonl"), manifest.files["dev.jsonl"])
+            for value in _read_jsonl(_allowed_path(root, query_file), manifest.files[query_file])
         )
     except ValidationError as exc:
         raise DatasetValidationError(f"invalid selection record: {exc}") from exc
@@ -233,7 +253,7 @@ def load_selection_dev(root: Path, *, tokenizer_path: Path | None = None) -> Sel
     _ensure_unique([query.case_id for query in queries], "case_id")
     for query in queries:
         _validate_query(query, corpus_by_key)
-    if manifest.dev.model_dump() != _computed_split_record(queries):
+    if getattr(manifest, split).model_dump() != _computed_split_record(queries):
         raise DatasetValidationError("selection dev summary mismatch")
     if set(manifest.case_rationales) != {query.case_id for query in queries} or any(
         not value.strip() for value in manifest.case_rationales.values()
@@ -243,3 +263,38 @@ def load_selection_dev(root: Path, *, tokenizer_path: Path | None = None) -> Sel
     if tokenizer_path is not None:
         validate_e5_inputs(result, tokenizer_path)
     return result
+
+
+def validate_independence(dev, validation):
+    """Структурная проверка; semantic renaming дополнительно проверяет автор audit."""
+    dimensions = {
+        "memory_keys": (
+            {r.memory_key for r in dev.corpus},
+            {r.memory_key for r in validation.corpus},
+        ),
+        "physical_ids": ({r.id for r in dev.corpus}, {r.id for r in validation.corpus}),
+        "logical_ids": (
+            {r.logical_id for r in dev.corpus},
+            {r.logical_id for r in validation.corpus},
+        ),
+        "contents": (
+            {r.content.casefold().strip() for r in dev.corpus},
+            {r.content.casefold().strip() for r in validation.corpus},
+        ),
+        "source_groups": (
+            {r.source_ref for r in dev.corpus},
+            {r.source_ref for r in validation.corpus},
+        ),
+        "paraphrase_families": (
+            {q.split_group for q in dev.queries},
+            {q.split_group for q in validation.queries},
+        ),
+        "queries": (
+            {q.query.casefold().strip() for q in dev.queries},
+            {q.query.casefold().strip() for q in validation.queries},
+        ),
+    }
+    for name, (before, after) in dimensions.items():
+        if before & after:
+            raise DatasetValidationError(f"validation {name} overlap")
+    return {name: True for name in dimensions}

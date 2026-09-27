@@ -39,9 +39,12 @@ from tests.evals.experiments.reranker_selection import analyze_repeats, candidat
 from tests.evals.experiments.selection_dataset import (
     _eligible,
     load_selection_dev,
+    load_selection_validation,
     validate_e5_inputs,
+    validate_independence,
 )
-from tests.evals.experiments.selection_resources import SessionMonitor
+from tests.evals.experiments.selection_embedding import ProcessEmbeddingExecutor
+from tests.evals.experiments.selection_resources import ProcessSessionMonitor, SessionMonitor
 
 REPO = Path(__file__).resolve().parents[4]
 SERVICE = REPO / "orna-memory-mcp"
@@ -144,7 +147,48 @@ def container_footprint(container):
         return {"measurement": None, "status": "unknown"}
 
 
+def same_identity(actual, frozen):
+    return json.dumps(actual, sort_keys=True) == json.dumps(frozen, sort_keys=True)
+
+
+def load_research_candidate(path, expected_sha256):
+    if digest(path) != expected_sha256:
+        raise ValueError("frozen candidate hash mismatch")
+    candidate = json.loads(path.read_text())
+    anchor = json.loads((DEV / "research-freeze-v2.json").read_text())
+    if (
+        expected_sha256 != anchor["candidate_sha256"]
+        or candidate["threshold"] != anchor["threshold"]
+    ):
+        raise ValueError("independent freeze anchor mismatch")
+    if (
+        candidate["replay_sha256"] != anchor["replay_sha256"]
+        or digest(path.with_name("replay.json")) != anchor["replay_sha256"]
+    ):
+        raise ValueError("frozen replay hash mismatch")
+    if (
+        candidate.get("artifact_type") != "research-only-reranker"
+        or candidate.get("policy") != "selection-protocol-v2"
+        or candidate.get("research_only") is not True
+        or candidate.get("ready_for_research_validation") is not True
+        or candidate.get("production_admitted") is not False
+    ):
+        raise ValueError("invalid research candidate")
+    threshold = candidate["threshold"]
+    if not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+        raise ValueError("invalid frozen threshold")
+    if digest(DEV / "protocol-v2.md") != candidate["policy_sha256"]:
+        raise ValueError("policy hash mismatch")
+    for name, expected in candidate["inference_files_sha256"].items():
+        path = (REPO / name).resolve()
+        if not path.is_relative_to(REPO) or digest(path) != expected:
+            raise ValueError("frozen inference code/config hash mismatch")
+    return candidate
+
+
 async def run(args):
+    validation = getattr(args, "validation", None)
+    candidate = None
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     settings = Settings(
@@ -162,11 +206,12 @@ async def run(args):
         rrf_k=60,
     )
     artifact = {
-        "experiment": "P2.5-04",
+        "experiment": "P2.5-05-research-validation" if validation else "P2.5-04",
         "diagnostic_exception": "user-2026-09-26",
         "status": "partial",
-        "p2_5_03_resource_gate": False,
-        "swap_budget_bytes": 0,
+        "historical_p2_5_03_resource_gate": False,
+        "resource_policy": "host-swap-diagnostic-v1",
+        "host_swap_role": "diagnostic_only",
         "repeats": [],
         "warmup": [],
         "config": {"seed": 0, "pool": 20, "rrf_k": 60, "cutoff": 5, "warmups": 2, "repeats": 3},
@@ -176,7 +221,8 @@ async def run(args):
         "client_prompt_tokens": None,
     }
     client = QwenWorkerSession(REPO / "data/models/phase-2-5/hub")
-    monitor = SessionMonitor(output / "resources.jsonl", worker=lambda: client.process)
+    monitor_class = ProcessSessionMonitor if validation else SessionMonitor
+    monitor = monitor_class(output / "resources.jsonl", worker=lambda: client.process)
     client.check_budget = monitor.check
     events = (output / "queries.jsonl").open("x")
 
@@ -187,8 +233,14 @@ async def run(args):
     try:
         if not is_model_cache_ready(settings.embedding_cache_dir):
             raise RuntimeError("pinned offline E5 cache unavailable")
-        dataset = load_selection_dev(
-            DEV,
+        if validation:
+            candidate = load_research_candidate(args.candidate, args.candidate_sha256)
+            artifact["frozen_candidate_sha256"] = args.candidate_sha256
+            artifact["frozen_threshold"] = candidate["threshold"]
+            artifact["policy"] = candidate["policy"]
+        loader = load_selection_validation if validation else load_selection_dev
+        dataset = loader(
+            validation if validation else DEV,
             tokenizer_path=ACTIVE_EMBEDDING_PROFILE.snapshot_path(settings.embedding_cache_dir)
             / "tokenizer.json",
         )
@@ -197,7 +249,38 @@ async def run(args):
             ACTIVE_EMBEDDING_PROFILE.snapshot_path(settings.embedding_cache_dir) / "tokenizer.json",
         )
         artifact["identity"] = identity(settings)
+        if candidate:
+            for key in ("e5_profile", "e5_files_sha256", "packages", "python"):
+                if not same_identity(artifact["identity"][key], candidate["dev_identity"][key]):
+                    raise ValueError("frozen E5/core runtime identity mismatch")
+            if artifact["config"] != candidate["config"]:
+                raise ValueError("frozen retrieval config mismatch")
         artifact["dataset"] = dataset.manifest.model_dump(mode="json")
+        if validation:
+            artifact["independence_checks"] = validate_independence(
+                load_selection_dev(DEV), dataset
+            )
+            frozen = {
+                name: digest(validation / name)
+                for name in ("manifest.json", "corpus.jsonl", "validation.jsonl")
+            }
+            artifact["validation_files_sha256"] = frozen
+            audit = json.loads((validation / "independence-audit.json").read_text())
+            if (
+                audit["files_sha256"] != frozen
+                or audit["candidate_sha256"] != args.candidate_sha256
+            ):
+                raise ValueError("validation independence audit hash mismatch")
+            artifact["independence_audit_sha256"] = digest(validation / "independence-audit.json")
+            dump(
+                output / "pre-inference-freeze.json",
+                {
+                    "candidate_sha256": args.candidate_sha256,
+                    "dataset_sha256": frozen,
+                    "code_identity": artifact["identity"],
+                    "model_inference_started": False,
+                },
+            )
         queries = sorted(dataset.queries, key=lambda q: q.case_id)
         random.Random(0).shuffle(queries)
         artifact["query_order"] = [q.case_id for q in queries]
@@ -205,6 +288,7 @@ async def run(args):
             dict(q.model_dump(), allowed=[r.memory_key for r in dataset.corpus if _eligible(r, q)])
             for q in queries
         ]
+        artifact["query_specs"] = query_specs
         key_by_id = {str(r.id): r.memory_key for r in dataset.corpus}
         artifact["db_container_before"] = container_footprint(args.container)
         dump(output / "run.json", artifact)
@@ -212,7 +296,11 @@ async def run(args):
             setup = perf_counter()
             async with ephemeral_eval_database(settings) as db:
                 artifact["database_name"] = db.name
-                embeddings = AsyncEmbeddingExecutor(EmbeddingService(db.settings))
+                embeddings = (
+                    ProcessEmbeddingExecutor(db.settings, monitor)
+                    if validation
+                    else AsyncEmbeddingExecutor(EmbeddingService(db.settings))
+                )
                 try:
                     monitor.phase = "e5-load"
                     load_started = perf_counter()
@@ -233,6 +321,10 @@ async def run(args):
                     session_start = perf_counter()
                     with client:
                         artifact["qwen"] = client.ready
+                        if candidate and any(
+                            client.ready.get(k) != v for k, v in candidate["qwen"].items()
+                        ):
+                            raise RuntimeError("frozen Qwen identity mismatch")
                         artifact["worker_process_startup_seconds"] = perf_counter() - session_start
                         sanity = [
                             Candidate("good", "good", "The demo service listens on port 8123."),
@@ -328,7 +420,12 @@ async def run(args):
                                 ranked = rank_candidates(scored)
                                 # Все возможные query-level filter outputs измеряются сейчас;
                                 # threshold selection позже только replay, без model calls.
-                                for threshold in {0.0, 1.0, *(r.score for r in ranked)}:
+                                thresholds = (
+                                    [candidate["threshold"]]
+                                    if candidate
+                                    else {0.0, 1.0, *(r.score for r in ranked)}
+                                )
+                                for threshold in thresholds:
                                     [r.id for r in ranked if r.score >= threshold][:5]
                                 sample["scores"] = [
                                     dict(asdict(r), key=key_by_id[r.id]) for r in scored
@@ -367,6 +464,11 @@ async def run(args):
                         artifact["quality_run_seconds"] = perf_counter() - session_start
                 finally:
                     await embeddings.aclose()
+        if validation and (
+            any(digest(validation / name) != h for name, h in frozen.items())
+            or digest(args.candidate) != args.candidate_sha256
+        ):
+            raise RuntimeError("frozen validation inputs changed during run")
         artifact["status"] = "complete-diagnostic"
     except Exception as exc:
         # Не сериализуем DSN/credentials из сторонних exceptions.
@@ -383,8 +485,18 @@ async def run(args):
         complete = artifact["status"] == "complete-diagnostic"
         if complete:
             try:
-                analysis = analyze_repeats(query_specs, artifact["repeats"])
-                dump(output / "threshold-trials.json", analysis)
+                analysis = analyze_repeats(
+                    query_specs,
+                    artifact["repeats"],
+                    policy="selection-protocol-v2" if candidate else "selection-protocol-v1",
+                    fixed_threshold=candidate["threshold"] if candidate else None,
+                )
+                dump(
+                    output / ("validation-results.json" if candidate else "threshold-trials.json"),
+                    analysis,
+                )
+                if candidate:
+                    artifact["quality_validation_pass"] = analysis["trials"][0]["quality_pass"]
                 artifact["quality_threshold"] = analysis["quality_threshold"]
             except Exception as exc:
                 complete = False
@@ -407,7 +519,6 @@ async def run(args):
             if client.peak_rss_bytes
             else resource["worker_rss_pass"],
             "aggregate_rss": resource["aggregate_rss_pass"],
-            "swap": resource["swap_no_growth"],
             "query_timeout": complete,
             "qwen_load": artifact.get("qwen", {}).get("load_seconds", float("inf")) <= 120,
             "e5_load": artifact.get("e5_cold_load_and_first_query_seconds", float("inf")) <= 120,
@@ -420,8 +531,10 @@ async def run(args):
                 for x in [*series["per_repeat"], series["pooled"]]
             )
         artifact["cost_gates"] = gates
+        validation_pass = artifact.get("quality_validation_pass", False)
+        artifact["admission_gates"] = dict(gates, independent_quality_validation=validation_pass)
         artifact["candidate_admitted"] = candidate_admitted(
-            artifact.get("quality_threshold"), dict(gates, p2_5_03_resource_gate=False)
+            artifact.get("quality_threshold"), gates, validation_pass=validation_pass
         )
         dump(output / "run.json", artifact)
     return 0 if artifact["status"] == "complete-diagnostic" else 1
@@ -432,7 +545,14 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--container", required=True)
+    parser.add_argument("--validation", type=Path)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--candidate-sha256")
     args = parser.parse_args()
+    if bool(args.validation) != bool(args.candidate) or bool(args.candidate) != bool(
+        args.candidate_sha256
+    ):
+        parser.error("validation requires candidate and candidate-sha256 together")
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
     return asyncio.run(run(args))
 

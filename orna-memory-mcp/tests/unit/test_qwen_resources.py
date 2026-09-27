@@ -21,7 +21,7 @@ from tests.evals.experiments.qwen_runtime import worker
         ([100, None, 120], 20, False),
     ],
 )
-def test_swap_gate_uses_observed_peak_and_requires_complete_samples(values, growth, gate):
+def test_swap_diagnostic_uses_observed_peak_and_requires_complete_samples(values, growth, gate):
     samples = [
         {
             "elapsed_seconds": i / 10,
@@ -76,7 +76,7 @@ def test_monitor_samples_during_work_and_stops_on_error(monkeypatch):
     assert summary["samples"][-1]["phase"] == "overlong"
 
 
-def test_known_but_sparse_samples_cannot_pass_resource_gate():
+def test_sparse_samples_leave_swap_diagnostic_unknown():
     samples = [
         {
             "elapsed_seconds": elapsed,
@@ -91,7 +91,7 @@ def test_known_but_sparse_samples_cannot_pass_resource_gate():
     assert summary["sampling_healthy"] is False
 
 
-def test_background_sampler_failure_cannot_pass_resource_gate(monkeypatch):
+def test_background_sampler_failure_leaves_swap_diagnostic_unknown(monkeypatch):
     attempted = Event()
 
     def broken_probe():
@@ -109,9 +109,19 @@ def test_background_sampler_failure_cannot_pass_resource_gate(monkeypatch):
     assert summary["sampling_error"] == "RuntimeError"
 
 
-@pytest.mark.parametrize(("values", "expected"), [([100, 110], False), ([100, None], None)])
-def test_smoke_control_window_is_not_subtracted_or_ignored(monkeypatch, values, expected):
-    # Две границы control; все model samples затем стабильны.
+@pytest.mark.parametrize(
+    ("values", "expected", "measurement_expected"),
+    [
+        ([100, 110], False, True),
+        ([100, None], None, True),
+        ([None, None], None, True),
+        ([100, 100, 100, 120, 130], True, False),
+        ([100, 100, None, None, None], True, None),
+    ],
+)
+def test_smoke_host_swap_is_diagnostic_not_a_gate(
+    monkeypatch, values, expected, measurement_expected
+):
     probes = iter(values)
     monkeypatch.setattr(worker, "_swap_bytes", lambda: next(probes, 110))
     monkeypatch.setattr(worker, "CONTROL_SECONDS", 0)
@@ -123,16 +133,21 @@ def test_smoke_control_window_is_not_subtracted_or_ignored(monkeypatch, values, 
 
     monkeypatch.setattr(worker, "_smoke", fake_smoke)
     evidence = worker._run_smoke(None, None, {})
-    assert evidence["gates"]["control_swap_no_growth"] is expected
-    assert evidence["gates"]["swap_no_growth"] is True
+    assert all(value is True for value in evidence["gates"].values())
+    assert "control_swap_no_growth" not in evidence["gates"]
+    assert "swap_no_growth" not in evidence["gates"]
     assert evidence["resources"]["control"]["swap_no_growth"] is expected
+    assert evidence["resources"]["measurement"]["swap_no_growth"] is measurement_expected
     assert evidence["resources"]["measurement"]["samples"][0]["phase"] == "load"
 
 
 def test_main_writes_failed_resource_artifact_and_exits_one(monkeypatch, tmp_path):
     import json
 
-    evidence = {"gates": {"swap_no_growth": False}, "resources": {"samples": [100, 120, 100]}}
+    evidence = {
+        "gates": {"worker_peak_rss_le_6_gib": False},
+        "resources": {"worker_peak_rss_bytes": 7 * 1024**3},
+    }
     monkeypatch.setattr(worker, "verify_environment", lambda _: (tmp_path, {}))
     monkeypatch.setattr(worker, "_run_smoke", lambda *_: evidence)
     output = tmp_path / "failed-smoke"

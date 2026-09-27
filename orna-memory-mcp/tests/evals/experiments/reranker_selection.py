@@ -6,8 +6,13 @@ from math import isclose, isfinite
 from tests.evals.metrics import MetricCase, evaluate_rankings
 
 
-def candidate_admitted(threshold, gates):
-    return threshold is not None and bool(gates) and all(v is True for v in gates.values())
+def candidate_admitted(threshold, gates, *, validation_pass=False):
+    return (
+        validation_pass is True
+        and threshold is not None
+        and bool(gates)
+        and all(v is True for v in gates.values())
+    )
 
 
 def ranking(sample, threshold, cutoff=5):
@@ -55,7 +60,9 @@ def summarize(queries, rankings):
     return result
 
 
-def preservation(queries, baseline, rankings):
+def preservation(queries, baseline, rankings, policy="selection-protocol-v2"):
+    if policy not in {"selection-protocol-v1", "selection-protocol-v2"}:
+        raise ValueError("unknown preservation policy")
     regressions, new_hits, fixed = [], [], []
     for q in queries:
         cid, relevant = q["case_id"], set(q["relevance"])
@@ -63,7 +70,16 @@ def preservation(queries, baseline, rankings):
         if relevant:
             lost = sorted((set(before) & relevant) - set(after))
             top1_changed = bool(
-                before and before[0] in relevant and (not after or after[0] != before[0])
+                before
+                and before[0] in relevant
+                and (
+                    not after
+                    or (
+                        after[0] != before[0]
+                        if policy == "selection-protocol-v1"
+                        else q["relevance"].get(after[0], 0) < q["relevance"][before[0]]
+                    )
+                )
             )
             if lost or top1_changed:
                 regressions.append(
@@ -76,10 +92,10 @@ def preservation(queries, baseline, rankings):
     return regressions, new_hits, fixed
 
 
-def compare(queries, baseline, samples, threshold):
+def compare(queries, baseline, samples, threshold, policy="selection-protocol-v2"):
     rankings = {s["case_id"]: ranking(s, threshold) for s in samples}
     result = summarize(queries, rankings)
-    regressions, new_hits, fixed = preservation(queries, baseline["rankings"], rankings)
+    regressions, new_hits, fixed = preservation(queries, baseline["rankings"], rankings, policy)
     n = result["near_topic"]["total"]
     gain = (baseline["near_topic"]["hits"] - result["near_topic"]["hits"]) / n if n else None
     b, m = baseline["aggregate"], result["aggregate"]
@@ -102,7 +118,11 @@ def compare(queries, baseline, samples, threshold):
     return result
 
 
-def analyze_repeats(queries, repeats):
+def analyze_repeats(queries, repeats, *, policy="selection-protocol-v2", fixed_threshold=None):
+    if fixed_threshold is not None and (
+        not isfinite(fixed_threshold) or not 0 <= fixed_threshold <= 1
+    ):
+        raise ValueError("invalid frozen threshold")
     expected = {q["case_id"] for q in queries}
     if not repeats or any(
         len(r) != len(expected) or {s["case_id"] for s in r} != expected for r in repeats
@@ -137,11 +157,21 @@ def analyze_repeats(queries, repeats):
         ranking(r[c], None, 20) == ranking(by_id[0][c], None, 20) for r in by_id for c in expected
     )
     baselines = [summarize(queries, {s["case_id"]: s["baseline"] for s in r}) for r in repeats]
-    reranked = [compare(queries, b, r, None) for b, r in zip(baselines, repeats, strict=True)]
-    thresholds = sorted({0.0, 1.0, *(x["score"] for r in repeats for s in r for x in s["scores"])})
+    reranked = (
+        []
+        if fixed_threshold is not None
+        else [compare(queries, b, r, None, policy) for b, r in zip(baselines, repeats, strict=True)]
+    )
+    thresholds = (
+        [fixed_threshold]
+        if fixed_threshold is not None
+        else sorted({0.0, 1.0, *(x["score"] for r in repeats for s in r for x in s["scores"])})
+    )
     trials = []
     for t in thresholds:
-        measured = [compare(queries, b, r, t) for b, r in zip(baselines, repeats, strict=True)]
+        measured = [
+            compare(queries, b, r, t, policy) for b, r in zip(baselines, repeats, strict=True)
+        ]
         decisions = [
             [[(x["key"], x["score"] >= t) for x in r[c]["scores"]] for c in sorted(expected)]
             for r in by_id

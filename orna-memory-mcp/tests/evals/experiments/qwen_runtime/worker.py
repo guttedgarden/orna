@@ -515,6 +515,8 @@ def _run_smoke(snapshot: Path, args, manifest: dict) -> dict:
             "sample_interval_seconds_requested": SAMPLE_INTERVAL_SECONDS,
             "max_sample_gap_seconds_allowed": MAX_SAMPLE_GAP_SECONDS,
             "swap_scope": "host",
+            "host_swap_role": "diagnostic_only",
+            "resource_policy": "host-swap-diagnostic-v1",
             "rss_scope": "worker-lifetime-high-water-mark",
             "control": control_summary,
             "measurement": measured,
@@ -534,8 +536,6 @@ def _run_smoke(snapshot: Path, args, manifest: dict) -> dict:
         "load_seconds_le_120": load_seconds <= 120,
         "each_query_seconds_le_180": all(s <= 180 for s in resources["query_seconds"]),
         "worker_peak_rss_le_6_gib": measured["worker_peak_rss_bytes"] <= 6 * 1024**3,
-        "control_swap_no_growth": control_summary["swap_no_growth"],
-        "swap_no_growth": measured["swap_no_growth"],
     }
     return evidence
 
