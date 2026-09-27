@@ -1,0 +1,24 @@
+{
+  "frozen_at": "2026-09-26T08:44:22.753277+00:00",
+  "author_task": "/root/validation_author_new_facts",
+  "context": "clean; rubric/schema/slices/exclusion rules only; no threshold/scores/errors",
+  "original_draft_sha256": "3e2a0c9a9034a7bf315391fd99ba5cd58c5995c6f76239d0078d9f1b3f9806f5",
+  "structural_disjointness": {
+    "memory_keys": true,
+    "physical_ids": true,
+    "logical_ids": true,
+    "contents": true,
+    "source_groups": true,
+    "paraphrase_families": true,
+    "queries": true
+  },
+  "semantic_review": "Primary read all new corpus/labels and dev corpus/queries before model inference. New compiler/geospatial/font/tracing/Decimal/timezone/Unicode/TLV facts and paraphrase families; no renamed dev facts. All 14 negatives reviewed against entire visible new corpus. No old holdout/abstention validation opened.",
+  "pre_freeze_corrections": "Author corrected topic-only partials, invalid multi-record labels, non-equivalent TLV example and EN→RU coverage following rubric-only feedback. Primary corrected three source descriptions to match revised facts. No scores existed.",
+  "files_sha256": {
+    "corpus.jsonl": "e85b7b5063f05e9a11f53d8bef80780b6956c7a4f4b71fe10499608918aac165",
+    "validation.jsonl": "0b69422c902b424ea32b1a0c08eb3b3c620cbfbff23eb722022da035c44462a3",
+    "manifest.json": "10bc937a318c63fc083fb9ced05973ab82aabca8486f21a5230d2440ec105aef"
+  },
+  "e5_max_tokens": 53,
+  "candidate_sha256": "0638e88e75e7caa780d64bc2050200a120a8210c9a1bb05befb63ceb1348681f"
+}

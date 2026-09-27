@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "dataset_version": "selection-validation-v2",
+  "frozen_at": "2026-09-26",
+  "provenance": "synthetic",
+  "sources": [
+    {
+      "source_ref": "SRC-COMP-ARCHIVE",
+      "description": "Synthetic compiler archive convention."
+    },
+    {
+      "source_ref": "SRC-COMP-PATHS",
+      "description": "Synthetic debug-path wrapper convention."
+    },
+    {
+      "source_ref": "SRC-GEO-EXCHANGE",
+      "description": "Synthetic field GeoJSON exchange convention."
+    },
+    {
+      "source_ref": "SRC-GEO-SURVEY",
+      "description": "Synthetic surveying-import storage convention."
+    },
+    {
+      "source_ref": "SRC-FONT-SHAPING",
+      "description": "Synthetic complex-script shaping convention."
+    },
+    {
+      "source_ref": "SRC-FONT-VARIABLE",
+      "description": "Synthetic variable-font rendering convention."
+    },
+    {
+      "source_ref": "SRC-TRACE-WIRE",
+      "description": "Synthetic tracing wire convention."
+    },
+    {
+      "source_ref": "SRC-TRACE-PRIVACY",
+      "description": "Synthetic tracing export policy."
+    },
+    {
+      "source_ref": "SRC-DECIMAL-SUMMARY",
+      "description": "Synthetic laboratory-summary procedure."
+    },
+    {
+      "source_ref": "SRC-DECIMAL-STORAGE",
+      "description": "Synthetic pressure-reading storage decision."
+    },
+    {
+      "source_ref": "SRC-TIME-MANUAL",
+      "description": "Synthetic manual-time-entry procedure."
+    },
+    {
+      "source_ref": "SRC-TIME-IMPORT",
+      "description": "Synthetic legacy meter-import policy."
+    },
+    {
+      "source_ref": "SRC-UNICODE-LABELS",
+      "description": "Synthetic label normalization policy."
+    },
+    {
+      "source_ref": "SRC-UNICODE-ASSETS",
+      "description": "Synthetic asset-name procedure."
+    },
+    {
+      "source_ref": "SRC-BIN-TLV",
+      "description": "Synthetic TLV relay decision."
+    },
+    {
+      "source_ref": "SRC-BIN-V3",
+      "description": "Synthetic envelope-v3 policy."
+    },
+    {
+      "source_ref": "SRC-COMP-SYMBOLS",
+      "description": "Synthetic compiler-symbol procedure."
+    },
+    {
+      "source_ref": "SRC-GEO-TILES",
+      "description": "Synthetic field-ingest coordinate-layout diagnostic convention."
+    },
+    {
+      "source_ref": "SRC-FONT-FALLBACK",
+      "description": "Synthetic resolved-font-axis diagnostic convention."
+    },
+    {
+      "source_ref": "SRC-TRACE-SAMPLING",
+      "description": "Synthetic sampling decision."
+    },
+    {
+      "source_ref": "SRC-DECIMAL-CALIBRATION",
+      "description": "Synthetic calibration procedure."
+    },
+    {
+      "source_ref": "SRC-TIME-SCHEDULE",
+      "description": "Synthetic calibration parser diagnostic convention."
+    },
+    {
+      "source_ref": "SRC-UNICODE-DISPLAY",
+      "description": "Synthetic Unicode display procedure."
+    },
+    {
+      "source_ref": "SRC-BIN-FRAMING",
+      "description": "Synthetic binary-frame policy."
+    },
+    {
+      "source_ref": "SRC-COMP-DIAGNOSTICS",
+      "description": "Synthetic diagnostic-coordinate decision."
+    },
+    {
+      "source_ref": "SRC-GEO-FENCE",
+      "description": "Synthetic geofence convention."
+    },
+    {
+      "source_ref": "SRC-FONT-LINEBREAK",
+      "description": "Synthetic line-breaking policy."
+    },
+    {
+      "source_ref": "SRC-TRACE-CLOCK",
+      "description": "Synthetic span-clock decision."
+    },
+    {
+      "source_ref": "SRC-DECIMAL-WIRE",
+      "description": "Synthetic decimal-wire procedure."
+    },
+    {
+      "source_ref": "SRC-TIME-GAP",
+      "description": "Synthetic gap-time policy."
+    },
+    {
+      "source_ref": "SRC-BIN-ENUM",
+      "description": "Synthetic binary-enum evolution policy."
+    },
+    {
+      "source_ref": "SRC-COMP-SOURCEMAP",
+      "description": "Synthetic source-map procedure."
+    },
+    {
+      "source_ref": "SRC-GEO-INGEST-DIAGNOSTIC",
+      "description": "Synthetic GeoJSON-ingest diagnostic procedure."
+    },
+    {
+      "source_ref": "SRC-FONT-AXIS-DIAGNOSTIC",
+      "description": "Synthetic variable-font-axis diagnostic procedure."
+    },
+    {
+      "source_ref": "SRC-DECIMAL-PARSE-DIAGNOSTIC",
+      "description": "Synthetic calibration-parser diagnostic procedure."
+    },
+    {
+      "source_ref": "SRC-BIN-PROXY-TLV",
+      "description": "Synthetic TLV proxy evolution policy."
+    }
+  ],
+  "label_policy": "Grade2 direct supported answer/constraint; grade1 actionable partial without topic-only overlap. Labels frozen before scores.",
+  "limitations": "Small synthetic coding-domain independent set; not production distribution or task-level utility. Author blind to threshold/dev scores/errors.",
+  "files": {
+    "corpus.jsonl": {
+      "records": 32,
+      "sha256": "e85b7b5063f05e9a11f53d8bef80780b6956c7a4f4b71fe10499608918aac165"
+    },
+    "validation.jsonl": {
+      "records": 30,
+      "sha256": "0b69422c902b424ea32b1a0c08eb3b3c620cbfbff23eb722022da035c44462a3"
+    }
+  },
+  "validation": {
+    "records": 30,
+    "positive": 16,
+    "negative": 14,
+    "slices": {
+      "cross_lingual": 10,
+      "en_to_ru": 1,
+      "exact_identifier": 14,
+      "multi_record": 5,
+      "near_topic": 12,
+      "negative": 14,
+      "ood": 2,
+      "partial": 3,
+      "path": 1,
+      "ru_to_en": 9,
+      "semantic": 16
+    }
+  },
+  "case_rationales": {
+    "p01": "m01 directly specifies both requested deterministic-archive constraints.",
+    "p02": "m02 directly names the remapping flag and its diagnostic-message boundary.",
+    "p03": "m03 directly specifies GeoJSON position order; m18 names a concrete trace attribute that can verify the received layout but does not state the required order, so it is useful partial support.",
+    "p04": "m04 directly states the stored axis order and CRS before exchange conversion.",
+    "p05": "m05 directly gives script/language setup and required-versus-optional feature order.",
+    "p06": "m06 directly supplies the drift cause and fixed opsz value; m19 names the resolved-axis diagnostic location but supplies no default policy or value, so grade 1.",
+    "p07": "m07 directly specifies the header version, lowercase representation, and both ID lengths.",
+    "p08": "m08 directly gives the baggage-key predicate and confirms trace IDs stay available.",
+    "p09": "m09 directly establishes aggregation and final rounding, while m10 directly supplies the requested available storage precision; both requested subparts are grade 2.",
+    "p10": "m21 directly requires decimal-string parsing and forbids binary-float construction; m22 gives the concrete diagnostic location to check the active parser but does not prescribe construction, so grade 1.",
+    "p11": "m11 directly requires explicit fold selection or rejection for this manual Berlin input.",
+    "p12": "m12 directly selects the later repeated New York occurrence and records its assumption.",
+    "p13": "m13 directly requires NFC and gives the concrete reason NFKC is forbidden.",
+    "p14": "m14 directly separates preserved display code points from NFC duplicate comparison.",
+    "p15": "m15 and m31 are independently applicable grade-2 answers to the same TLV-extension need: each requires unknown optional extensions to survive relay forwarding unchanged.",
+    "p16": "m16 directly gives unsigned-varint encoding and the 16 MiB pre-allocation limit.",
+    "n01": "Compiler memories discuss archive determinism, path remapping, symbols, diagnostics, and source maps; none supplies a cache-eviction policy or actionable eviction parameter.",
+    "n02": "Geospatial memories define axes, CRS, tiles, and boundary classification; none explains antimeridian cutting or self-intersection repair.",
+    "n03": "Font memories cover shaping, optical size, fallback, and line breaking; none selects color-glyph palettes or dark-background treatment.",
+    "n04": "Tracing memories cover headers, baggage filtering, sampling, and clocks; none contains a graph algorithm for critical-path computation.",
+    "n05": "The corpus mandates HALF_EVEN for a different summary task and contains no stochastic-rounding simulation method; the contradictory existing rule is grade 0.",
+    "n06": "Time memories define ambiguity and gap handling for named workflows; none provides future timezone-rule acquisition for arbitrary regions.",
+    "n07": "Unicode memories cover NFC, filename comparison, and grapheme-safe truncation; none gives bidi-control detection or safe source rendering.",
+    "n08": "Binary memories specify framing, TLV evolution, enum preservation, and length bounds; none compares compression algorithms or CPU tradeoffs.",
+    "n09": "Compiler memories contain no third-party-runtime licensing requirement or generated-code notice.",
+    "n10": "Geospatial memories contain no label-layout or collision-resolution method across zoom levels.",
+    "n11": "Font memories contain no Icelandic hyphenation dictionary or language-specific fallback selection rule.",
+    "n12": "Tracing memories describe wire and collector behavior only; none identifies a mobile gesture-instrumentation SDK.",
+    "o01": "No corpus row concerns thermal control loops, thermistors, or PID tuning.",
+    "o02": "No corpus row concerns duct acoustics, vibration measurement, or resonance diagnosis."
+  }
+}
